@@ -6,7 +6,7 @@ A private plane-spotting logbook. Log aircraft by registration with photos and v
 
 | Part | Service | Cost |
 |---|---|---|
-| Website and `/api` functions | Cloudflare Pages (deploys from this repo) | Free |
+| Website and `/api` functions | Cloudflare Workers (deploys from this repo) | Free |
 | Login, logbook data, photos and videos | Supabase | Free plan |
 | Live positions | adsb.lol, with airplanes.live as a backup | Free, non-commercial |
 | Aircraft details and routes | adsbdb.com | Free, non-commercial |
@@ -15,14 +15,11 @@ Until Supabase is connected, the site runs in **demo mode** with sample planes a
 
 ## Setup
 
-### 1. Put the site online (Cloudflare Pages)
+### 1. Put the site online (Cloudflare)
 1. Sign up at dash.cloudflare.com.
-2. Go to **Workers & Pages → Create → Pages → Connect to Git** and pick **SpottersDream**.
-3. Use these build settings:
-   - Framework preset: **None**
-   - Build command: *(leave empty)*
-   - Build output directory: **public**
-4. Click **Save and Deploy**. You'll get an address like `spottersdream.pages.dev`.
+2. Go to **Workers & Pages → Create application** and import the **SpottersDream** repository from GitHub.
+3. Keep the defaults: project name `spottersdream`, an empty build command, and deploy command `npx wrangler deploy`. The `wrangler.jsonc` file in this repo tells Cloudflare what to do.
+4. Click **Deploy**. You'll get an address like `spottersdream.<your-name>.workers.dev`.
 
 Every push to `main` updates the site automatically.
 
@@ -53,13 +50,15 @@ Open the site in Safari, tap **Share → Add to Home Screen**. It then opens ful
 ## Files
 
 ```
+wrangler.jsonc     Cloudflare settings
 public/            the website (Cloudflare serves this folder)
   js/app.js        globe, logbook, stats, add-a-spot
   js/store.js      Supabase and demo data
   js/media.js      photo shrinking, video thumbnails, photo date and location
   js/data.js       airports, airlines, aircraft types, landmarks
   js/config.js     Supabase connection details
-functions/api/     /api/lookup and /api/positions (run on Cloudflare)
+worker/index.js    Cloudflare entry point: sends /api/* to the functions, everything else to public/
+functions/api/     /api/lookup and /api/positions
 lib/flight.js      shared code for the API functions
 supabase/          database setup scripts
 ```
