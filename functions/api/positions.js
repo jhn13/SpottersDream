@@ -1,9 +1,9 @@
 // POST /api/positions  { "regs": ["G-JZHA", "EI-DWF"] }
 // -> { at, planes: { "G-JZHA": { lat, lon, alt, gs, track, onGround, callsign, seenPos, route } | null }, errors }
-import { json, normReg, cached, pool, fetchLiveOne, fetchRoute, liveErrors } from '../../lib/flight.js';
+import { json, normReg, cached, pool, fetchLiveMany, fetchRoute, liveErrors } from '../../lib/flight.js';
 
-// Cloudflare's free plan allows 50 outgoing calls per request, so the app sends planes in small batches.
-const MAX_REGS = 15;
+// All planes are looked up in a single call; routes are added for up to 20 flying planes.
+const MAX_REGS = 120;
 
 export async function onRequestPost({ request, env }) {
   let body;
@@ -11,20 +11,18 @@ export async function onRequestPost({ request, env }) {
   const regs = [...new Set((body.regs || []).map(normReg).filter(Boolean))].slice(0, MAX_REGS);
   if (!regs.length) return json({ at: Date.now(), planes: {}, errors: 0 });
 
-  const planes = {};
-  const failed = [];
-  await pool(regs, 4, async reg => {
-    try {
-      planes[reg] = await cached('live:' + reg, 15, () => fetchLiveOne(reg, env));
-    } catch (e) {
-      failed.push(reg);
-      planes[reg] = null;
-    }
-  });
+  let planes = {}, failed = [];
+  try {
+    const key = 'many:' + regs.slice().sort().join(',');
+    planes = await cached(key, 15, () => fetchLiveMany(regs, env));
+  } catch (e) {
+    failed = regs.slice();
+    regs.forEach(r => { planes[r] = null; });
+  }
   const errors = failed.length;
 
   // Add routes for anything flying with a callsign.
-  await pool(Object.keys(planes).filter(r => planes[r] && planes[r].callsign && !planes[r].onGround), 4, async reg => {
+  await pool(Object.keys(planes).filter(r => planes[r] && planes[r].callsign && !planes[r].onGround).slice(0, 20), 4, async reg => {
     const p = planes[reg];
     p.route = await fetchRoute(p.callsign, p);
   });

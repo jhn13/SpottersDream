@@ -162,7 +162,7 @@ async function supabaseStore(config) {
     async positions(regs) {
       // Small batches in parallel: each one stays well inside Cloudflare's per-request limits.
       const chunks = [];
-      for (let i = 0; i < regs.length; i += 12) chunks.push(regs.slice(i, i + 12));
+      for (let i = 0; i < regs.length; i += 100) chunks.push(regs.slice(i, i + 100));
       const out = { at: Date.now(), planes: {}, errors: 0, failed: [] };
       await Promise.all(chunks.map(async chunk => {
         try {
@@ -171,6 +171,7 @@ async function supabaseStore(config) {
           const j = await r.json();
           Object.assign(out.planes, j.planes || {});
           (j.failed || []).forEach(reg => out.failed.push(reg));
+          if (j.sourceErrors && j.sourceErrors.length) console.warn('Live data problem:', j.sourceErrors.join(' | '));
         } catch (e) {
           chunk.forEach(reg => out.failed.push(reg));
         }
