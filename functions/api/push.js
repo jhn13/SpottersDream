@@ -6,7 +6,10 @@ import { getVapid, sendPush } from '../../lib/push.js';
 
 export async function onRequest({ request, env }) {
   const d = db(env);
-  if (!d) return json({ error: 'Notifications aren\'t set up yet. The Supabase secret key needs adding in Cloudflare.' }, 503);
+  if (!d) {
+    const missing = ['SUPABASE_URL', 'SUPABASE_SECRET_KEY'].filter(k => !env[k]);
+    return json({ error: 'Notifications aren\'t set up yet.', missing, hint: 'Add these under the worker\'s Settings -> Variables and Secrets (not the Build section).' }, 503);
+  }
   const path = new URL(request.url).pathname;
 
   if (path.endsWith('/key') && request.method === 'GET') {
