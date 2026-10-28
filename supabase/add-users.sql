@@ -1,12 +1,12 @@
 -- Run this AFTER creating both accounts in Supabase (Authentication -> Users -> Add user).
--- Change the two email addresses (and names) to match the accounts you created, then Run.
+-- Paste into SQL Editor and click Run.
 
 insert into public.profiles (id, display_name, role)
-select id, 'Dad', 'admin' from auth.users where email = 'CHANGE-ME-your-email@example.com'
+select id, 'Dad', 'admin' from auth.users where email = 'joshnaylor@me.com'
 on conflict (id) do update set role = excluded.role, display_name = excluded.display_name;
 
 insert into public.profiles (id, display_name, role)
-select id, 'Spotter', 'spotter' from auth.users where email = 'CHANGE-ME-his-email@example.com'
+select id, 'Spotter', 'spotter' from auth.users where email = 'farmybob@icloud.com'
 on conflict (id) do update set role = excluded.role, display_name = excluded.display_name;
 
 -- Check it worked: you should see two rows.

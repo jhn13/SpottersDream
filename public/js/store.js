@@ -12,7 +12,7 @@ export async function createStore(config) {
 
 /* ---------------- Supabase ---------------- */
 async function supabaseStore(config) {
-  const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm');
+  const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/+esm');
   const sb = createClient(config.SUPABASE_URL, config.SUPABASE_ANON_KEY, { auth: { persistSession: true, autoRefreshToken: true } });
   const bucket = () => sb.storage.from('media');
 
