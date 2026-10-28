@@ -5,7 +5,8 @@ import { createMap, arc } from './map.js';
 
 const d3 = window.d3, topojson = window.topojson;
 const EARTH_MI = 3958.8, EARTH_KM = 6371;
-const LIVE_MAX_AGE_S = 90;
+const LIVE_MAX_AGE_S = 120;
+const KEEP_LIVE_ON_ERROR_MS = 5 * 60000;
 
 /* ================= small helpers ================= */
 const $ = s => document.querySelector(s);
@@ -718,10 +719,15 @@ async function refreshPositions() {
     const res = await store.positions(PLANES.map(p => p.reg));
     const now = Date.now();
     feedState = { ok: !(res.errors && res.errors >= PLANES.length), at: now };
+    const failed = new Set(res.failed || []);
     for (const p of PLANES) {
       const L = res.planes[p.reg];
       const isLive = L && L.seenPos != null && L.seenPos <= LIVE_MAX_AGE_S;
-      if (!isLive) { if (!(res.errors && p.live && now - (p.liveAt || 0) < 120000)) p.live = null; continue; }
+      if (!isLive) {
+        // If the lookup failed (rather than the plane going quiet), keep showing it as live for a few minutes.
+        if (!(failed.has(p.reg) && p.live && now - (p.liveAt || 0) < KEEP_LIVE_ON_ERROR_MS)) p.live = null;
+        continue;
+      }
       p.live = L; p.liveAt = now;
       const moved = !p.last || d3.geoDistance([p.last.lon, p.last.lat], [L.lon, L.lat]) * EARTH_KM > 10 || p.last.onGround !== !!L.onGround;
       if (moved || now - p.last.at > 10 * 60000) {

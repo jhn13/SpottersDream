@@ -117,9 +117,24 @@ async function supabaseStore(config) {
       return r.json();
     },
     async positions(regs) {
-      const r = await fetch('/api/positions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ regs }) });
-      if (!r.ok) throw new Error('Live positions are not available right now.');
-      return r.json();
+      // Small batches in parallel: each one stays well inside Cloudflare's per-request limits.
+      const chunks = [];
+      for (let i = 0; i < regs.length; i += 12) chunks.push(regs.slice(i, i + 12));
+      const out = { at: Date.now(), planes: {}, errors: 0, failed: [] };
+      await Promise.all(chunks.map(async chunk => {
+        try {
+          const r = await fetch('/api/positions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ regs: chunk }) });
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          const j = await r.json();
+          Object.assign(out.planes, j.planes || {});
+          (j.failed || []).forEach(reg => out.failed.push(reg));
+        } catch (e) {
+          chunk.forEach(reg => out.failed.push(reg));
+        }
+      }));
+      out.errors = out.failed.length;
+      if (out.errors === regs.length) throw new Error('Live positions are not available right now.');
+      return out;
     },
     async savePosition(plane, live) {
       const rpc = await sb.rpc('record_position', { p_plane: plane.id, p_lat: live.lat, p_lon: live.lon, p_alt: live.alt == null ? null : Math.round(live.alt), p_track: live.track, p_on_ground: !!live.onGround });
