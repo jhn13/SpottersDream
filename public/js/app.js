@@ -258,7 +258,7 @@ function renderDetail(p) {
     return `<button class="mtile" type="button" data-m="${i}" aria-label="Open photo ${i + 1}"><img src="${m.poster || m.url}" alt="Photo of ${esc(p.reg)}" loading="lazy">${dt}</button>`;
   }).join("");
   const sc = score(PLANES).bySighting;
-  const sights = p.sightings.slice().sort((a, b) => b.spotted_on.localeCompare(a.spotted_on)).map(s => `<li><span class="nd"></span><div><b>${esc(apName(s.airport))}</b> <span class="m">${fmtDate(s.spotted_on)}</span>${sc[s.id] ? ` <span class="ptschip">+${sc[s.id].points}</span>` : ""}${s.note ? `<q>${esc(s.note)}</q>` : ""}${admin ? `<div class="acts"><button class="mini del" type="button" data-dels="${s.id}">Delete this spot</button></div>` : ""}</div></li>`).join("");
+  const sights = p.sightings.slice().sort((a, b) => b.spotted_on.localeCompare(a.spotted_on)).map(s => `<li><span class="nd"></span><div><b>${esc(apName(s.airport))}</b> <span class="m">${fmtDate(s.spotted_on)}</span>${sc[s.id] ? ` <span class="ptschip">+${sc[s.id].points}</span>` : ""}${s.note ? `<q>${esc(s.note)}</q>` : ""}${s.media.length ? `<span class="m mcount">${s.media.length} ${s.media.length === 1 ? "photo or video" : "photos and videos"}</span>` : ""}${canAdd() || admin ? `<div class="acts">${canAdd() ? `<button class="mini" type="button" data-addm="${s.id}">Add photos or videos</button>` : ""}${admin ? `<button class="mini del" type="button" data-dels="${s.id}">Delete this spot</button>` : ""}</div>` : ""}</div></li>`).join("");
   const buses = ty ? Math.round(ty.span / 11.2 * 2) / 2 : 0;
   const spotAp = getAirport(latest(p).airport);
   $("#detail").innerHTML = `
@@ -276,6 +276,7 @@ function renderDetail(p) {
         ${spotAp ? `<button class="btn flat" type="button" data-go="spot"><svg viewBox="0 0 24 24"><path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg>Where I saw it</button>` : ""}
         ${posOf(p) ? `<button class="btn flat" type="button" data-go="plane"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>${p.live ? "Where it is now" : "Last position"}</button>` : ""}
       </div>
+      ${canAdd() ? `<button class="btn primary wide" type="button" data-again><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>I spotted ${esc(p.reg)} again</button>` : ""}
       <div class="btnrow"><button class="btn flat" type="button" data-alert><svg viewBox="0 0 24 24"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20a2 2 0 0 0 4 0"/></svg>Alert me about ${esc(p.reg)}</button></div>
       ${admin ? `<div class="btnrow"><button class="btn danger" type="button" data-delp>Delete ${esc(p.reg)} from the logbook</button></div>` : ""}
     </div>`;
@@ -286,7 +287,31 @@ function renderDetail(p) {
   d.querySelectorAll("[data-dels]").forEach(b => b.addEventListener("click", () => deleteSighting(p, p.sightings.find(s => s.id === b.dataset.dels))));
   const dp = d.querySelector("[data-delp]"); if (dp) dp.addEventListener("click", () => deletePlane(p));
   d.querySelector("[data-alert]").addEventListener("click", () => openAlerts(p.reg));
+  const ag = d.querySelector("[data-again]"); if (ag) ag.addEventListener("click", () => openAdd({ reg: p.reg }));
+  d.querySelectorAll("[data-addm]").forEach(b => b.addEventListener("click", () => pickMediaFor(p, p.sightings.find(s => s.id === b.dataset.addm))));
   updClock();
+}
+const mediaPicker = Object.assign(document.createElement("input"), { type: "file", accept: "image/*,video/*", multiple: true, hidden: true });
+document.body.appendChild(mediaPicker);
+function pickMediaFor(p, s) {
+  if (!s) return;
+  mediaPicker.value = "";
+  mediaPicker.onchange = async () => {
+    const files = [...mediaPicker.files]; if (!files.length) return;
+    const ready = [];
+    toast(`Getting ${files.length === 1 ? "it" : files.length + " files"} ready…`, 60000);
+    for (const f of files) {
+      try { ready.push(f.type.startsWith("video") ? await prepareVideo(f) : await preparePhoto(f)); }
+      catch (e) { toast(e.message, 6000); }
+    }
+    if (!ready.length) return;
+    try {
+      await store.addMedia(p.id, s, ready, (i, n) => toast(`Uploading ${i} of ${n}…`, 60000));
+      await reload(p.id);
+      toast(`Added ${ready.length} to the ${fmtDate(s.spotted_on)} spot`);
+    } catch (e) { toast("Couldn't upload: " + e.message, 6000); }
+  };
+  mediaPicker.click();
 }
 function select(id, fly) {
   const p = PLANES.find(x => x.id === id); if (!p) return;
@@ -333,10 +358,16 @@ async function deletePlane(p) {
 }
 
 /* ================= logbook + account ================= */
-let logAp = null;
+let logAp = null, logSort = "recent";
 function renderList() {
   const q = ($("#q").value || "").trim().toLowerCase();
-  let rows = PLANES.slice().sort((a, b) => latest(b).spotted_on.localeCompare(latest(a).spotted_on));
+  const sorters = {
+    recent: (a, b) => latest(b).spotted_on.localeCompare(latest(a).spotted_on),
+    most: (a, b) => spots(b) - spots(a) || latest(b).spotted_on.localeCompare(latest(a).spotted_on),
+    az: (a, b) => a.reg.localeCompare(b.reg)
+  };
+  let rows = PLANES.slice().sort(sorters[logSort]);
+  document.querySelectorAll("#logSort [data-sort]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.sort === logSort)));
   if (logAp) rows = rows.filter(p => p.sightings.some(s => s.airport === logAp));
   if (q) rows = rows.filter(p => [p.reg, p.airline, p.type_name].join(" ").toLowerCase().includes(q));
   const total = PLANES.reduce((a, p) => a + spots(p), 0);
@@ -365,6 +396,7 @@ function renderList() {
 function openLogbook(ap) { logAp = ap || null; selected = null; $("#q").value = ""; renderList(); openSheet("logbook"); syncMap(); if (mapApi) mapApi.setPadding(mapPadding()); }
 $("#openLog").addEventListener("click", () => openLogbook());
 $("#q").addEventListener("input", renderList);
+document.querySelectorAll("#logSort [data-sort]").forEach(b => b.addEventListener("click", () => { logSort = b.dataset.sort; renderList(); }));
 function exportBackup() {
   const data = PLANES.map(p => ({ reg: p.reg, type: p.type_name, icao_type: p.icao_type, airline: p.airline, airline_icao: p.airline_icao, last: p.last,
     sightings: p.sightings.map(s => ({ airport: s.airport, date: s.spotted_on, note: s.note, media: s.media.map(m => ({ kind: m.kind, path: m.path })) })) }));
@@ -439,6 +471,7 @@ function renderStats() {
         ${far ? tile("Furthest from where it was spotted", `<span class="v mono">${esc(far.p.reg)}</span>`, `${num(far.mi)} miles away`, "", far.p.id) : ""}
         ${tile("In the air / on the ground", `<span class="v">${inAir} / ${ground}</span>`, `${PLANES.filter(p => p.live).length} broadcasting live`)}
       </div></section>
+      ${(() => { const top = PLANES.filter(p => spots(p) > 1).sort((a, b) => spots(b) - spots(a) || latest(b).spotted_on.localeCompare(latest(a).spotted_on)).slice(0, 10); return top.length ? `<section><h3 class="eyebrow">Most spotted planes</h3><ol class="leader">${top.map((p, i) => { const th = thumbOf(p); return `<li><button type="button" data-sel="${p.id}"><span class="pos">${i + 1}</span>${th ? `<img src="${th}" alt="" loading="lazy">` : `<span class="noimg"></span>`}<span class="who"><b class="mono">${esc(p.reg)}</b><small>${esc(p.type_name || "")}${p.airline ? " · " + esc(p.airline) : ""}</small></span><span class="cnt">×${spots(p)}</span></button></li>`; }).join("")}</ol></section>` : `<section><h3 class="eyebrow">Most spotted planes</h3><p class="hint">Spot the same plane twice and it'll appear here.</p></section>`; })()}
       ${air.length ? `<section><h3 class="eyebrow">Spots by airline</h3><div class="chart">${air.map(([n, v]) => `<div class="bar-row" title="${esc(n)}: ${v} spots"><span class="nm">${tailSVG(airPlane(n))}${esc(n)}</span><span class="trk"><span class="fill" style="width:${v / maxA * 100}%"></span></span><span class="val">${v}</span></div>`).join("")}</div></section>` : ""}
       <section><h3 class="eyebrow">Spots by month</h3><div class="cols">${months.map(m => `<div class="col" title="${m.label}: ${m.v} spots"><span class="cv${m.v ? "" : " z"}">${m.v}</span><span class="c" style="height:${m.v / maxM * 80}%"></span></div>`).join("")}</div><div class="collbl">${months.map(m => `<span>${m.label}</span>`).join("")}</div></section>
       <section><h3 class="eyebrow">Badges · ${earned} earned</h3><div class="badges">${badgesHTML}</div></section>

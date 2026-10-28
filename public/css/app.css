@@ -456,3 +456,15 @@ body.viewer #openAdd, body.viewer #welcomeAdd, body.viewer .logit{display:none!i
 .qt{display:flex;align-items:center;gap:6px}
 .qt .in{width:auto;padding:8px 10px;font-size:15px}
 .mono{font-family:var(--f-mono)}
+.mcount{display:block;margin-top:2px}
+.leader{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
+.leader button{width:100%;display:grid;grid-template-columns:22px 52px 1fr auto;gap:10px;align-items:center;border:0;background:var(--panel-2);border-radius:12px;padding:6px 10px 6px 8px;text-align:left}
+.leader .pos{font:700 15px/1 var(--f-display);color:var(--muted);text-align:center}
+.leader li:first-child .pos{color:#D99A00}
+.leader img,.leader .noimg{width:52px;height:36px;border-radius:6px;object-fit:cover;display:block;background:var(--line)}
+.leader .who{min-width:0}
+.leader .who b{display:block;font:600 14.5px/1.1 var(--f-mono)}
+.leader .who small{display:block;color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.leader .cnt{font:700 18px/1 var(--f-display);color:var(--route)}
+/* Stop the app frame ever being scrolled sideways (e.g. by the iPad keyboard or scrollIntoView). */
+#app{overflow:hidden;overflow:clip}

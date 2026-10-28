@@ -205,6 +205,22 @@ async function supabaseStore(config) {
       }
       return planeId;
     },
+    // Add more photos or videos to a spot that's already saved.
+    async addMedia(planeId, sighting, files, onProgress) {
+      const user = (await sb.auth.getUser()).data.user;
+      let done = 0;
+      for (const f of files) {
+        onProgress && onProgress(++done, files.length);
+        const base = `${planeId}/${sighting.id}/${crypto.randomUUID()}`;
+        const path = `${base}.${f.ext}`;
+        const up = await bucket().upload(path, f.blob, { contentType: f.blob.type, upsert: false });
+        if (up.error) throw new Error(`Couldn't upload a ${f.kind}: ${up.error.message}`);
+        let poster_path = null;
+        if (f.poster) { poster_path = `${base}-thumb.jpg`; const pu = await bucket().upload(poster_path, f.poster, { contentType: 'image/jpeg', upsert: false }); if (pu.error) poster_path = null; }
+        const mi = await sb.from('media').insert({ sighting_id: sighting.id, kind: f.kind, path, poster_path, created_by: user.id });
+        if (mi.error) throw mi.error;
+      }
+    },
     async deleteSighting(s) {
       await removeFiles(s.media.flatMap(m => [m.path, m.poster_path]));
       const { error } = await sb.from('sightings').delete().eq('id', s.id);
@@ -295,6 +311,10 @@ function demoStore() {
         })
       });
       return p.id;
+    },
+    async addMedia(planeId, sighting, files) {
+      const p = planes.find(x => x.id === planeId); const s = p && p.sightings.find(x => x.id === sighting.id); if (!s) return;
+      files.forEach(f => { const url = URL.createObjectURL(f.blob); s.media.push({ id: lid(), kind: f.kind, url, poster: f.poster ? URL.createObjectURL(f.poster) : (f.kind === 'photo' ? url : null) }); });
     },
     async deleteSighting(s) { planes.forEach(p => { p.sightings = p.sightings.filter(x => x.id !== s.id); }); planes = planes.filter(p => p.sightings.length); },
     async deleteMedia(m) { planes.forEach(p => p.sightings.forEach(s => { s.media = s.media.filter(x => x.id !== m.id); })); },
