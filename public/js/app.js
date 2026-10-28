@@ -276,6 +276,7 @@ function renderDetail(p) {
         ${spotAp ? `<button class="btn flat" type="button" data-go="spot"><svg viewBox="0 0 24 24"><path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg>Where I saw it</button>` : ""}
         ${posOf(p) ? `<button class="btn flat" type="button" data-go="plane"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>${p.live ? "Where it is now" : "Last position"}</button>` : ""}
       </div>
+      <div class="btnrow"><button class="btn flat" type="button" data-alert><svg viewBox="0 0 24 24"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20a2 2 0 0 0 4 0"/></svg>Alert me about ${esc(p.reg)}</button></div>
       ${admin ? `<div class="btnrow"><button class="btn danger" type="button" data-delp>Delete ${esc(p.reg)} from the logbook</button></div>` : ""}
     </div>`;
   const d = $("#detail");
@@ -284,6 +285,7 @@ function renderDetail(p) {
   const gp = d.querySelector('[data-go="plane"]'); if (gp) gp.addEventListener("click", () => flyTo(posOf(p), onGround(p) ? 13 : 7));
   d.querySelectorAll("[data-dels]").forEach(b => b.addEventListener("click", () => deleteSighting(p, p.sightings.find(s => s.id === b.dataset.dels))));
   const dp = d.querySelector("[data-delp]"); if (dp) dp.addEventListener("click", () => deletePlane(p));
+  d.querySelector("[data-alert]").addEventListener("click", () => openAlerts(p.reg));
   updClock();
 }
 function select(id, fly) {
@@ -351,12 +353,14 @@ function renderList() {
     <div class="who">Signed in as <b>${esc(me.name || me.email)}</b>${roleLabel}</div>
     <div class="btnrow">
       ${isAdmin() ? `<button class="btn flat" type="button" id="exportBtn">Download backup</button>` : ""}
+      <button class="btn flat" type="button" id="myAlertsBtn">My alerts</button>
       ${store.mode !== "demo" ? `<button class="btn flat" type="button" id="chPwBtn">Change password</button>` : ""}
       <button class="btn flat" type="button" id="signOutBtn">Sign out</button>
     </div>`;
   $("#signOutBtn").addEventListener("click", signOut);
   const ex = $("#exportBtn"); if (ex) ex.addEventListener("click", exportBackup);
   const cp = $("#chPwBtn"); if (cp) cp.addEventListener("click", () => showAuth("newpw", { mode: "change" }));
+  $("#myAlertsBtn").addEventListener("click", () => openAlerts());
 }
 function openLogbook(ap) { logAp = ap || null; selected = null; $("#q").value = ""; renderList(); openSheet("logbook"); syncMap(); if (mapApi) mapApi.setPadding(mapPadding()); }
 $("#openLog").addEventListener("click", () => openLogbook());
@@ -515,6 +519,151 @@ function celebrate(p, sc, rankBefore, rankAfter, wasNew) {
   el.hidden = false;
   $("#celOk").addEventListener("click", () => { el.hidden = true; });
   $("#celOk").focus();
+}
+
+/* ================= alerts ================= */
+let ALERTS = [], SETTINGS = {}, alertDraft = { reg: "", kind: "near", place: "LBA", radius: 10 };
+const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const standalone = () => (window.matchMedia && matchMedia("(display-mode: standalone)").matches) || navigator.standalone === true;
+const pushSupported = () => "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+function urlB64(b) { const s = atob(b.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((b.length + 3) % 4)); return Uint8Array.from(s, c => c.charCodeAt(0)); }
+async function currentSub() { try { const r = await navigator.serviceWorker.ready; return await r.pushManager.getSubscription(); } catch (e) { return null; } }
+function alertText(a) {
+  if (a.kind === "takeoff") return "when it takes off";
+  if (a.kind === "landing") return "when it's coming in to land";
+  const where = a.place === "home" ? "home" : a.place === "me" ? "wherever I am" : (a.place_name || "the airport");
+  return `when it's within ${a.radius_mi} miles of ${where}`;
+}
+function getHere() {
+  return new Promise((res, rej) => {
+    if (!navigator.geolocation) return rej(new Error("This device can't share its location."));
+    navigator.geolocation.getCurrentPosition(p => res([p.coords.latitude, p.coords.longitude]), e => rej(new Error(e.code === 1 ? "Location is switched off for this app. Allow it in Settings to use this." : "Couldn't find where you are. Try again outside or with Wi-Fi on.")), { enableHighAccuracy: false, timeout: 12000, maximumAge: 10 * 60000 });
+  });
+}
+async function updateHere(silent) {
+  try {
+    const [lat, lon] = await getHere();
+    await store.saveSettings({ here_lat: lat, here_lon: lon, here_at: new Date().toISOString() });
+    SETTINGS.here_lat = lat; SETTINGS.here_lon = lon; SETTINGS.here_at = new Date().toISOString();
+    return true;
+  } catch (e) { if (!silent) toast(e.message, 5000); return false; }
+}
+async function loadAlerts() {
+  try { [ALERTS, SETTINGS] = await Promise.all([store.getAlerts(), store.getSettings()]); }
+  catch (e) { ALERTS = []; SETTINGS = {}; }
+}
+async function renderAlerts() {
+  const sub = pushSupported() ? await currentSub() : null;
+  let notif;
+  if (!pushSupported() || (isIOS && !standalone())) {
+    notif = isIOS && !standalone()
+      ? `<p><b>To get alerts on this ${/iPad/.test(navigator.userAgent) || navigator.maxTouchPoints > 1 && !/iPhone/.test(navigator.userAgent) ? "iPad" : "iPhone"}, add the app to your Home Screen first.</b> In Safari, tap <b>Share</b>, then <b>Add to Home Screen</b>. Open the app from the new icon and come back here.</p>`
+      : `<p>This browser can't show notifications. Try Safari on an iPhone or iPad, or Chrome on a computer.</p>`;
+  } else if (Notification.permission === "denied") {
+    notif = `<p>Notifications are blocked. ${isIOS ? "Open <b>Settings → Notifications → Spotters</b> and turn on Allow Notifications." : "Allow notifications for this site in your browser settings."}</p>`;
+  } else if (sub) {
+    notif = `<p class="okmsg">Notifications are on for this device.</p><div class="btnrow"><button class="btn flat" type="button" id="pushTest">Send a test</button><button class="btn flat" type="button" id="pushOff">Turn off</button></div>`;
+  } else {
+    notif = `<p>Turn on notifications so this device can tell you when your planes are nearby.</p><button class="btn primary wide" type="button" id="pushOn">Turn on notifications</button>`;
+  }
+  const apOpts = AIRPORT_LIST.filter(a => a[4] === "UK & Ireland").map(([c, n]) => `<option value="${c}"${alertDraft.place === c ? " selected" : ""}>${esc(n)}</option>`).join("");
+  const regOpts = PLANES.slice().sort((a, b) => a.reg.localeCompare(b.reg)).map(p => `<option value="${esc(p.reg)}">`).join("");
+  const hourOpts = sel => Array.from({ length: 24 }, (_, h) => `<option value="${h}"${h === sel ? " selected" : ""}>${String(h).padStart(2, "0")}:00</option>`).join("");
+  const homeSet = SETTINGS.home_lat != null;
+  $("#alerts").innerHTML = `
+    <div class="sh-head"><div><h2>Plane alerts</h2><div class="sh-sub">Get told when your planes are on the move</div></div><button class="icon-btn" data-close type="button" aria-label="Close">${CLOSE_SVG}</button></div>
+    <div class="sh-body">
+      <section class="wxcard">${notif}</section>
+      <section><h3 class="eyebrow">New alert</h3>
+        <form id="alertForm" class="alform" novalidate>
+          <div class="field"><label for="alReg">Registration</label><input class="in mono" id="alReg" list="alRegs" autocapitalize="characters" autocomplete="off" spellcheck="false" placeholder="e.g. G-JZHA" value="${esc(alertDraft.reg)}"><datalist id="alRegs">${regOpts}</datalist></div>
+          <div class="field"><span class="flabel">Tell me when it</span>
+            <div class="seg tabs" role="radiogroup">${[["near", "Is near"], ["takeoff", "Takes off"], ["landing", "Lands"]].map(([k, l]) => `<button type="button" data-kind="${k}" aria-pressed="${alertDraft.kind === k}">${l}</button>`).join("")}</div></div>
+          ${alertDraft.kind === "near" ? `<div class="grid2">
+            <div class="field"><label for="alPlace">Near</label><select class="in" id="alPlace"><option value="me"${alertDraft.place === "me" ? " selected" : ""}>Wherever I am</option><option value="home"${alertDraft.place === "home" ? " selected" : ""}>Home</option><optgroup label="Airports">${apOpts}</optgroup></select></div>
+            <div class="field"><label for="alRadius">Within</label><select class="in" id="alRadius">${[5, 10, 25, 50, 100].map(r => `<option value="${r}"${r === alertDraft.radius ? " selected" : ""}>${r} miles</option>`).join("")}</select></div></div>` : `<p class="hint">${alertDraft.kind === "takeoff" ? "You'll get a message as it climbs away from the runway." : "You'll get a message when it's on its final approach, a few minutes before it touches down."}</p>`}
+          <p class="err" id="alErr" hidden></p>
+          <button class="btn primary wide" type="submit">Save alert</button>
+        </form>
+      </section>
+      <section><h3 class="eyebrow">My alerts · ${ALERTS.length}</h3>
+        ${ALERTS.length ? `<ul class="allist">${ALERTS.map(a => `<li class="${a.active ? "" : "off"}"><div><b class="mono">${esc(a.reg)}</b> <span>${esc(alertText(a))}</span>${a.last_fired_at ? `<small>Last alert ${fmtAgo((Date.now() - Date.parse(a.last_fired_at)) / 60000)}</small>` : ""}</div>
+          <label class="switch"><input type="checkbox" data-toggle="${a.id}"${a.active ? " checked" : ""} aria-label="Alert on"><span></span></label>
+          <button class="icon-btn small" type="button" data-delal="${a.id}" aria-label="Delete alert">${CLOSE_SVG}</button></li>`).join("")}</ul>` : `<p class="empty">No alerts yet.</p>`}
+      </section>
+      <section><h3 class="eyebrow">Places and quiet time</h3>
+        <div class="setrow"><div><b>Home</b><small>${homeSet ? "Saved" : "Not set yet"}</small></div><button class="btn flat" type="button" id="setHome">${homeSet ? "Update to where I am" : "Set to where I am now"}</button></div>
+        <div class="setrow"><div><b>Wherever I am</b><small>${SETTINGS.here_at ? `Last updated ${fmtAgo((Date.now() - Date.parse(SETTINGS.here_at)) / 60000)}` : "Updates each time you open the app"}</small></div><button class="btn flat" type="button" id="setHere">Update now</button></div>
+        <div class="setrow"><div><b>Quiet time</b><small>No alerts between these times</small></div><div class="qt"><select class="in" id="qStart" aria-label="Quiet time starts">${hourOpts(SETTINGS.quiet_start ?? 21)}</select><span>to</span><select class="in" id="qEnd" aria-label="Quiet time ends">${hourOpts(SETTINGS.quiet_end ?? 7)}</select></div></div>
+      </section>
+      <p class="credit">Alerts are checked every 2 minutes, even when the app is closed.</p>
+    </div>`;
+  const A = $("#alerts");
+  const keepDraft = () => { alertDraft.reg = $("#alReg").value.trim().toUpperCase(); const pl = $("#alPlace"), ra = $("#alRadius"); if (pl) alertDraft.place = pl.value; if (ra) alertDraft.radius = +ra.value; };
+  A.querySelectorAll("[data-kind]").forEach(b => b.addEventListener("click", () => { keepDraft(); alertDraft.kind = b.dataset.kind; renderAlerts(); }));
+  $("#alertForm").addEventListener("submit", saveAlert);
+  A.querySelectorAll("[data-toggle]").forEach(c => c.addEventListener("change", async () => { try { await store.updateAlert(c.dataset.toggle, { active: c.checked, state: {} }); await loadAlerts(); renderAlerts(); } catch (e) { toast("Couldn't change it: " + e.message); } }));
+  A.querySelectorAll("[data-delal]").forEach(b => b.addEventListener("click", async () => { try { await store.deleteAlert(b.dataset.delal); await loadAlerts(); renderAlerts(); toast("Alert deleted"); } catch (e) { toast("Couldn't delete it: " + e.message); } }));
+  const on = $("#pushOn"); if (on) on.addEventListener("click", turnOnPush);
+  const off = $("#pushOff"); if (off) off.addEventListener("click", turnOffPush);
+  const test = $("#pushTest"); if (test) test.addEventListener("click", async () => { test.disabled = true; try { await store.testPush(); toast("Test sent. It should arrive in a few seconds."); } catch (e) { toast(e.message, 5000); } finally { test.disabled = false; } });
+  $("#setHome").addEventListener("click", async e => { e.currentTarget.disabled = true; try { const [lat, lon] = await getHere(); await store.saveSettings({ home_lat: lat, home_lon: lon }); SETTINGS.home_lat = lat; SETTINGS.home_lon = lon; toast("Home saved"); } catch (er) { toast(er.message, 5000); } renderAlerts(); });
+  $("#setHere").addEventListener("click", async e => { e.currentTarget.disabled = true; if (await updateHere(false)) toast("Location updated"); renderAlerts(); });
+  const saveQuiet = async () => { try { await store.saveSettings({ quiet_start: +$("#qStart").value, quiet_end: +$("#qEnd").value }); SETTINGS.quiet_start = +$("#qStart").value; SETTINGS.quiet_end = +$("#qEnd").value; toast("Quiet time saved", 1500); } catch (e) { toast("Couldn't save it: " + e.message); } };
+  $("#qStart").addEventListener("change", saveQuiet); $("#qEnd").addEventListener("change", saveQuiet);
+}
+async function saveAlert(e) {
+  e.preventDefault();
+  const err = $("#alErr"); err.hidden = true;
+  const reg = $("#alReg").value.trim().toUpperCase().replace(/\s+/g, "");
+  if (!/^[A-Z0-9-]{3,10}$/.test(reg)) { err.textContent = "Type a registration, for example G-JZHA."; err.hidden = false; return; }
+  const row = { reg, kind: alertDraft.kind, radius_mi: 10 };
+  if (alertDraft.kind === "near") {
+    const place = $("#alPlace").value, radius = +$("#alRadius").value;
+    row.radius_mi = radius;
+    if (place === "me" || place === "home") {
+      row.place = place;
+      if (place === "home" && SETTINGS.home_lat == null) { err.textContent = "Set your Home location first (below), then save this alert."; err.hidden = false; return; }
+      if (place === "me" && SETTINGS.here_lat == null && !(await updateHere(false))) { err.textContent = "This alert needs your location. Allow location access and try again."; err.hidden = false; return; }
+    } else {
+      const a = getAirport(place); row.place = "airport"; row.place_name = a ? a.n : place; row.lat = a ? a.c[1] : null; row.lon = a ? a.c[0] : null;
+    }
+  }
+  try {
+    await store.addAlert(row);
+    alertDraft.reg = "";
+    await loadAlerts(); renderAlerts();
+    const sub = pushSupported() ? await currentSub() : null;
+    toast(sub ? `Alert saved for ${reg}` : `Alert saved. Turn on notifications to receive it.`, 4000);
+  } catch (ex) { err.textContent = "Couldn't save the alert: " + ex.message; err.hidden = false; }
+}
+async function turnOnPush() {
+  try {
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted") { toast("Notifications weren't allowed. You can change this in Settings.", 5000); renderAlerts(); return; }
+    const key = await store.pushKey();
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64(key) });
+    const j = sub.toJSON();
+    await store.savePushSub({ endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth });
+    toast("Notifications are on!");
+  } catch (e) { toast("Couldn't turn on notifications: " + e.message, 6000); }
+  renderAlerts();
+}
+async function turnOffPush() {
+  const sub = await currentSub();
+  if (sub) { await store.deletePushSub(sub.endpoint).catch(() => {}); await sub.unsubscribe().catch(() => {}); }
+  toast("Notifications are off for this device"); renderAlerts();
+}
+async function openAlerts(reg) {
+  if (reg) alertDraft.reg = reg;
+  selected = null; openSheet("alerts"); syncMap(); if (mapApi) mapApi.setPadding(mapPadding());
+  $("#alerts").innerHTML = `<div class="sh-head"><div><h2>Plane alerts</h2></div><button class="icon-btn" data-close type="button" aria-label="Close">${CLOSE_SVG}</button></div><div class="sh-body"><p class="empty">Loading…</p></div>`;
+  await loadAlerts(); renderAlerts();
+}
+function openPlaneByReg(reg) {
+  const p = PLANES.find(x => x.reg === reg);
+  if (p) select(p.id, true); else if (reg) toast(`${reg} isn't in the logbook yet`);
 }
 
 /* ================= airport panel ================= */
@@ -963,6 +1112,9 @@ async function startApp() {
   try { await reload(null); }
   catch (e) { toast("Couldn't load the logbook: " + e.message, 6000); }
   refreshPositions(); startPositionLoop();
+  loadAlerts().then(() => { if (ALERTS.some(a => a.active && a.place === "me")) updateHere(true); });
+  const want = new URLSearchParams(location.search).get("plane");
+  if (want) { history.replaceState(null, "", location.pathname); openPlaneByReg(want.toUpperCase()); }
 }
 
 /* ================= boot ================= */
@@ -974,6 +1126,10 @@ function drawSpace() {
   if (css("--stars") === "1") { let s = 7; const r = () => (s = (s * 16807) % 2147483647) / 2147483647; for (let i = 0; i < w * h / 2600; i++) { x.globalAlpha = .25 + r() * .7; x.fillStyle = r() < .15 ? "#FFE9B8" : "#fff"; x.beginPath(); x.arc(r() * w, r() * h, r() < .92 ? r() * .9 + .2 : r() * 1.3 + .8, 0, 7); x.fill(); } }
 }
 async function boot() {
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("/sw.js").catch(() => {});
+    navigator.serviceWorker.addEventListener("message", e => { if (e.data && e.data.type === "open") { const u = new URL(e.data.url); openPlaneByReg((u.searchParams.get("plane") || "").toUpperCase()); } });
+  }
   drawSpace(); addEventListener("resize", () => { drawSpace(); if (mapApi) mapApi.resize(); });
   if (window.matchMedia) { const mq = matchMedia("(prefers-color-scheme: dark)"); mq.addEventListener && mq.addEventListener("change", drawSpace); }
   if (innerWidth < 640) $("#legend").open = false;
@@ -998,4 +1154,4 @@ async function boot() {
 }
 boot();
 // Handy for testing from the browser console.
-window.spotters = { openAirport: code => openAirport(AP_BY[code]), openAdd };
+window.spotters = { openAirport: code => openAirport(AP_BY[code]), openAdd, openAlerts };

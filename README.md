@@ -51,7 +51,16 @@ Supabase's built-in email only sends to members of your Supabase team, so send t
 ### 5. Inviting family and friends (view only)
 **Authentication → Users → Add user → Send invitation**, and enter their email. They tap the link, choose a password, and can see everything but can't add or delete. To make someone a spotter or admin, change their `role` in the `profiles` table.
 
-### 6. Add it to the iPad and iPhone home screen
+### 6. Plane alerts (database update 3 and one secret)
+1. Paste `supabase/003-alerts.sql` into **SQL Editor** and click **Run**.
+2. In Supabase, go to **Project Settings → API Keys → Secret keys** and copy a secret key (starts `sb_secret_`).
+3. In Cloudflare, open the **spottersdream** worker → **Settings → Variables and Secrets → Add**. Choose type **Secret**, name it `SUPABASE_SECRET_KEY`, paste the key and **Deploy**.
+
+The background job then runs every 2 minutes: it checks planes with alerts plus a rotating batch of logbook planes, updates last-seen positions (which also stops the free Supabase project pausing) and sends notifications. Notification signing keys are created automatically and stored in the `app_secrets` table.
+
+On iPhone and iPad, notifications only work when the app is opened from its Home Screen icon (Apple's rule).
+
+### 7. Add it to the iPad and iPhone home screen
 Open the site in Safari, tap **Share → Add to Home Screen**. It then opens full screen like an app and remembers the sign-in.
 
 ## Who can do what
@@ -65,7 +74,7 @@ Open the site in Safari, tap **Share → Add to Home Screen**. It then opens ful
 
 - **Free plan pause:** Supabase pauses free projects after a week with no use. If the app says it can't load, open the Supabase dashboard and click **Restore**. Upgrading to Pro ($25/month) stops this.
 - **Video size:** videos can be up to 50 MB each. For longer clips, trim them in Photos first.
-- **Last seen:** positions are checked every 30 seconds while the app is open. A plane's last-seen spot updates whenever someone has the app open while it's broadcasting.
+- **Last seen:** positions are checked every 30 seconds while the app is open, and in the background every 2 minutes (a rotating batch of planes) once alerts are set up.
 - **Optional adsb.lol key:** if adsb.lol starts requiring an API key, add it in Cloudflare under **Settings → Variables and Secrets** as `ADSBLOL_API_KEY`.
 
 ## Files
@@ -73,7 +82,9 @@ Open the site in Safari, tap **Share → Add to Home Screen**. It then opens ful
 ```
 wrangler.jsonc     Cloudflare settings
 public/            the website (Cloudflare serves this folder)
-  js/app.js        logbook, stats, airports, add-a-spot, sign-in
+  js/app.js        logbook, stats, album, alerts, airports, add-a-spot, sign-in
+  js/game.js       points, rarity tiers and ranks
+  sw.js            service worker that shows notifications
   js/map.js        the 3D globe (MapLibre), map and satellite styles
   vendor/          MapLibre GL JS 5.24.0
   data/airports.json  airports and runways from OurAirports
@@ -82,7 +93,9 @@ public/            the website (Cloudflare serves this folder)
   js/data.js       airports, airlines, aircraft types, landmarks
   js/config.js     Supabase connection details
 worker/index.js    Cloudflare entry point: sends /api/* to the functions, everything else to public/
-functions/api/     /api/lookup, /api/positions and /api/airport
+functions/api/     /api/lookup, /api/positions, /api/airport and /api/push/*
+lib/cron.js        the every-2-minutes job: positions, alerts, notifications
+lib/push.js        web push encryption and signing
 lib/flight.js      shared code for the API functions
 supabase/          database setup scripts
 ```

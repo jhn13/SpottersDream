@@ -111,6 +111,31 @@ async function supabaseStore(config) {
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'The lookup service did not answer.');
       return r.json();
     },
+    // ---------- alerts ----------
+    async getAlerts() { const { data, error } = await sb.from('alerts').select('*').order('created_at'); if (error) throw error; return data; },
+    async addAlert(a) { const { error } = await sb.from('alerts').insert(a); if (error) throw error; },
+    async updateAlert(id, fields) { const { error } = await sb.from('alerts').update(fields).eq('id', id); if (error) throw error; },
+    async deleteAlert(id) { const { error } = await sb.from('alerts').delete().eq('id', id); if (error) throw error; },
+    async getSettings() { const { data, error } = await sb.from('user_settings').select('*').maybeSingle(); if (error) throw error; return data || {}; },
+    async saveSettings(fields) {
+      const user = (await sb.auth.getUser()).data.user;
+      const { error } = await sb.from('user_settings').upsert({ user_id: user.id, ...fields, updated_at: new Date().toISOString() });
+      if (error) throw error;
+    },
+    async pushKey() {
+      const r = await fetch('/api/push/key'); const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || 'Notifications aren\'t available right now.'); return j.publicKey;
+    },
+    async savePushSub(s) {
+      await sb.from('push_subscriptions').delete().eq('endpoint', s.endpoint);
+      const { error } = await sb.from('push_subscriptions').insert(s); if (error) throw error;
+    },
+    async deletePushSub(endpoint) { await sb.from('push_subscriptions').delete().eq('endpoint', endpoint); },
+    async testPush() {
+      const { data } = await sb.auth.getSession();
+      const r = await fetch('/api/push/test', { method: 'POST', headers: { Authorization: 'Bearer ' + (data.session ? data.session.access_token : '') } });
+      const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || 'The test didn\'t send.');
+    },
     async airportLive(ap) {
       const r = await fetch(`/api/airport?icao=${encodeURIComponent(ap.i)}&lat=${ap.y}&lon=${ap.x}&elev=${ap.e || 0}`);
       if (!r.ok) throw new Error('Live airport info is not available right now.');
@@ -203,6 +228,8 @@ function demoStore() {
   let planes = demoPlanes();
   const me = { id: 'demo', email: 'demo', role: (window.SPOTTERS_CONFIG && window.SPOTTERS_CONFIG.DEMO_ROLE) || 'admin', name: 'Demo' };
   const lid = () => 'local-' + Math.random().toString(36).slice(2);
+  let demoAlerts = [{ id: 'demo-al1', reg: 'G-JZHA', kind: 'near', place: 'airport', place_name: 'Leeds Bradford', lat: 53.8659, lon: -1.6606, radius_mi: 10, active: true, state: {}, last_fired_at: new Date(Date.now() - 3 * 3600e3).toISOString() }];
+  const demoSettings = { quiet_start: 21, quiet_end: 7 };
   return {
     mode: 'demo',
     authLink: { intent: null, error: null, clear() {} },
@@ -220,6 +247,17 @@ function demoStore() {
       if (own) return { reg, found: true, icaoType: own.icao_type, type: own.type_name, owner: own.airline, operatorIcao: own.airline_icao, live: demoLive(reg) };
       return { reg, found: false, live: null };
     },
+    // ---------- alerts (demo: kept in memory) ----------
+    async getAlerts() { return demoAlerts.slice(); },
+    async addAlert(a) { demoAlerts.push({ id: lid(), active: true, state: {}, created_at: new Date().toISOString(), ...a }); },
+    async updateAlert(id, fields) { const a = demoAlerts.find(x => x.id === id); if (a) Object.assign(a, fields); },
+    async deleteAlert(id) { demoAlerts = demoAlerts.filter(x => x.id !== id); },
+    async getSettings() { return { ...demoSettings }; },
+    async saveSettings(fields) { Object.assign(demoSettings, fields); },
+    async pushKey() { throw new Error('Notifications don\'t work in demo mode.'); },
+    async savePushSub() {},
+    async deletePushSub() {},
+    async testPush() { throw new Error('Notifications don\'t work in demo mode.'); },
     async airportLive(ap) {
       // Pretend traffic circling the airport, so the panel can be tried without the live feed.
       const now = Date.now() / 1000, mk = (key, reg, type, cs, phase, dist, brg, alt, gs, rate, track, route) => {
