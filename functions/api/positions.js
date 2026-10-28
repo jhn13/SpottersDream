@@ -1,6 +1,6 @@
 // POST /api/positions  { "regs": ["G-JZHA", "EI-DWF"] }
 // -> { at, planes: { "G-JZHA": { lat, lon, alt, gs, track, onGround, callsign, seenPos, route } | null }, errors }
-import { json, normReg, cached, pool, fetchLiveOne, fetchRoute } from '../../lib/flight.js';
+import { json, normReg, cached, pool, fetchLiveOne, fetchRoute, liveErrors } from '../../lib/flight.js';
 
 // Cloudflare's free plan allows 50 outgoing calls per request, so the app sends planes in small batches.
 const MAX_REGS = 15;
@@ -29,7 +29,7 @@ export async function onRequestPost({ request, env }) {
     p.route = await fetchRoute(p.callsign, p);
   });
 
-  return json({ at: Date.now(), planes, errors, failed });
+  return json({ at: Date.now(), planes, errors, failed, sourceErrors: failed.length ? [...new Set(liveErrors.slice(-8))] : [] });
 }
 
 export async function onRequestGet({ request, env }) {
