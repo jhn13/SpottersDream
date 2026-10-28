@@ -1,6 +1,6 @@
 // GET /api/lookup?reg=G-JZHA
 // -> { reg, found, hex, icaoType, type, manufacturer, owner, operatorIcao, photo, live }
-import { json, normReg, cached, fetchAircraftInfo, fetchLiveOne, fetchRoute, plausible } from '../../lib/flight.js';
+import { json, normReg, cached, fetchAircraftInfo, fetchLiveOne, fetchRoute } from '../../lib/flight.js';
 
 export async function onRequestGet({ request, env }) {
   const reg = normReg(new URL(request.url).searchParams.get('reg'));
@@ -12,8 +12,7 @@ export async function onRequestGet({ request, env }) {
   ]);
 
   if (live && live.callsign && !live.onGround) {
-    const route = await fetchRoute(live.callsign);
-    live.route = plausible(route, live) ? route : null;
+    live.route = await fetchRoute(live.callsign, live);
   }
 
   // The live feed often knows the type even when the database doesn't.

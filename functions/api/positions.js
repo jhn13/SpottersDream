@@ -1,6 +1,6 @@
 // POST /api/positions  { "regs": ["G-JZHA", "EI-DWF"] }
 // -> { at, planes: { "G-JZHA": { lat, lon, alt, gs, track, onGround, callsign, seenPos, route } | null }, errors }
-import { json, normReg, cached, pool, fetchLiveOne, fetchRoute, plausible } from '../../lib/flight.js';
+import { json, normReg, cached, pool, fetchLiveOne, fetchRoute } from '../../lib/flight.js';
 
 const MAX_REGS = 80;
 
@@ -24,8 +24,7 @@ export async function onRequestPost({ request, env }) {
   // Add routes for anything flying with a callsign.
   await pool(Object.keys(planes).filter(r => planes[r] && planes[r].callsign && !planes[r].onGround), 4, async reg => {
     const p = planes[reg];
-    const route = await fetchRoute(p.callsign);
-    p.route = plausible(route, p) ? route : null;
+    p.route = await fetchRoute(p.callsign, p);
   });
 
   return json({ at: Date.now(), planes, errors });
