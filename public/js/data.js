@@ -128,7 +128,14 @@ export const TYPES = {
   AT76: T("ATR 72-600", 27.05, "about 72", false, "A turboprop built in France and Italy, great on short island hops."),
   AT75: T("ATR 72-500", 27.05, "about 70", false, "A turboprop built in France and Italy, great on short island hops."),
   SF34: T("Saab 340", 21.4, "about 34", false, "A small Swedish turboprop. Loganair flies them around Scotland."),
-  DHC6: T("Twin Otter", 19.8, "up to 19", false, "Loganair flies one onto the beach at Barra, the only scheduled beach runway in the world.")
+  DHC6: T("Twin Otter", 19.8, "up to 19", false, "Loganair flies one onto the beach at Barra, the only scheduled beach runway in the world."),
+  A346: T("Airbus A340-600", 63.45, "about 320", true, "One of the longest airliners ever built at 75 m, with four engines.", true),
+  MD11: T("McDonnell Douglas MD-11", 51.97, "cargo", true, "Spot the third engine in the tail. Most still flying carry cargo.", false),
+  B74F: T("Boeing 747-400 Freighter", 64.4, "cargo", true, "Its nose swings up so long cargo can slide straight in.", true),
+  A3ST: T("Airbus Beluga", 44.84, "cargo", true, "Shaped like a whale, it carries whole aircraft wings between Airbus factories.", false),
+  A124: T("Antonov An-124", 73.3, "cargo", true, "One of the biggest cargo planes in the world. It has 24 wheels and can carry trains.", true),
+  C17: T("Boeing C-17 Globemaster", 51.75, "military", true, "A military transport that can land on short, rough runways carrying a tank.", true),
+  A400: T("Airbus A400M Atlas", 42.4, "military", true, "A military transport with four huge propellers. The RAF flies them from Brize Norton.", true)
 };
 
 export function typeInfo(icao) { return icao && TYPES[icao] ? TYPES[icao] : null; }

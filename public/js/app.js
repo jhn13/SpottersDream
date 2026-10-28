@@ -2,6 +2,7 @@ import { PLANE_D, AIRPORT_LIST, AIRPORTS, AIRLINES, liveryFor, typeInfo } from '
 import { createStore } from './store.js';
 import { preparePhoto, prepareVideo, readExif } from './media.js';
 import { createMap, arc } from './map.js';
+import { TIERS, tierOf, score, rankFor, albumAirlines, albumTypes, albumAirports } from './game.js';
 
 const d3 = window.d3, topojson = window.topojson;
 const EARTH_MI = 3958.8, EARTH_KM = 6371;
@@ -212,7 +213,7 @@ function closeSheets(keepView) {
   updWelcome();
 }
 document.addEventListener("click", e => { if (e.target.closest("[data-close]")) closeSheets(); });
-document.addEventListener("keydown", e => { if (e.key === "Escape") { if (!$("#lightbox").hidden) closeLightbox(); else closeSheets(); } });
+document.addEventListener("keydown", e => { if (e.key === "Escape") { if (!$("#celebrate").hidden) $("#celebrate").hidden = true; else if (!$("#lightbox").hidden) closeLightbox(); else closeSheets(); } });
 
 /* ================= plane detail ================= */
 const busSVG = '<svg viewBox="0 0 18 11"><rect x=".5" y=".5" width="17" height="8.5" rx="1.6" fill="#D2232A"/><rect x="2" y="2" width="14" height="2.2" fill="#fff" opacity=".85"/><rect x="2" y="5.4" width="14" height="2" fill="#fff" opacity=".6"/><circle cx="4.5" cy="9.5" r="1.3" fill="#222"/><circle cx="13.5" cy="9.5" r="1.3" fill="#222"/></svg>';
@@ -256,11 +257,12 @@ function renderDetail(p) {
     if (m.kind === "video") return `<button class="mtile" type="button" data-m="${i}" aria-label="Play video">${m.poster ? `<img src="${m.poster}" alt="" loading="lazy">` : ""}<span class="play"><span><svg viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z"/></svg></span></span>${dt}</button>`;
     return `<button class="mtile" type="button" data-m="${i}" aria-label="Open photo ${i + 1}"><img src="${m.poster || m.url}" alt="Photo of ${esc(p.reg)}" loading="lazy">${dt}</button>`;
   }).join("");
-  const sights = p.sightings.slice().sort((a, b) => b.spotted_on.localeCompare(a.spotted_on)).map(s => `<li><span class="nd"></span><div><b>${esc(apName(s.airport))}</b> <span class="m">${fmtDate(s.spotted_on)}</span>${s.note ? `<q>${esc(s.note)}</q>` : ""}${admin ? `<div class="acts"><button class="mini del" type="button" data-dels="${s.id}">Delete this spot</button></div>` : ""}</div></li>`).join("");
+  const sc = score(PLANES).bySighting;
+  const sights = p.sightings.slice().sort((a, b) => b.spotted_on.localeCompare(a.spotted_on)).map(s => `<li><span class="nd"></span><div><b>${esc(apName(s.airport))}</b> <span class="m">${fmtDate(s.spotted_on)}</span>${sc[s.id] ? ` <span class="ptschip">+${sc[s.id].points}</span>` : ""}${s.note ? `<q>${esc(s.note)}</q>` : ""}${admin ? `<div class="acts"><button class="mini del" type="button" data-dels="${s.id}">Delete this spot</button></div>` : ""}</div></li>`).join("");
   const buses = ty ? Math.round(ty.span / 11.2 * 2) / 2 : 0;
   const spotAp = getAirport(latest(p).airport);
   $("#detail").innerHTML = `
-    <div class="sh-head"><div><div class="reg">${esc(p.reg)}</div><div class="sh-sub">${esc(p.type_name || "Type not set")} · ${esc(p.airline || "Airline not set")}</div></div>
+    <div class="sh-head"><div><div class="reg">${esc(p.reg)} <span class="tier ${tierOf(p.icao_type)}">${TIERS[tierOf(p.icao_type)].label}</span></div><div class="sh-sub">${esc(p.type_name || "Type not set")} · ${esc(p.airline || "Airline not set")}</div></div>
       <button class="icon-btn" data-close type="button" aria-label="Close">${CLOSE_SVG}</button></div>
     <div class="sh-body">
       ${statusBlock(p)}
@@ -387,6 +389,11 @@ function badgeList() {
     ["Half century", "Log 50 spots", Math.min(total, 50), 50, '<circle cx="12" cy="12" r="9"/><path d="M9 8.5h5M9 8.5v3.5h2.5a2.5 2.5 0 0 1 0 5H9"/>']
   ];
 }
+function rankCard(R) {
+  return `<section class="rankcard"><div class="rk-top"><span class="rk-lv">Level ${R.level}</span><b>${esc(R.name)}</b><span class="rk-pts">${R.points.toLocaleString("en-GB")} pts</span></div>
+    <div class="prog big"><i style="width:${Math.round(R.progress * 100)}%"></i></div>
+    <p class="hint">${R.next ? `${R.toNext.toLocaleString("en-GB")} points to ${esc(R.next.name)}` : "Top rank reached. Amazing spotting!"}</p></section>`;
+}
 function renderStats() {
   const total = PLANES.reduce((a, p) => a + spots(p), 0);
   const B = badgeList(), earned = B.filter(b => b[2] >= b[3]).length;
@@ -411,8 +418,10 @@ function renderStats() {
   const maxM = Math.max(1, ...months.map(m => m.v));
   const thumb = thumbOf(topPlane);
   const tile = (k, v, n, extra = "", sel) => `<${sel ? `button class="top1" type="button" data-sel="${sel}"` : `div class="top1"`}><span class="k">${k}</span>${extra}${v}<span class="n">${n}</span></${sel ? "button" : "div"}>`;
+  const R = rankFor(score(PLANES).total);
   $("#stats").innerHTML = head + `
     <div class="sh-body">
+      ${rankCard(R)}
       <div class="hero"><div><b>${total}</b><span>Spots</span></div><div><b>${PLANES.length}</b><span>Planes</span></div><div><b>${air.length}</b><span>Airlines</span></div><div><b>${types.length}</b><span>Types</span></div></div>
       <section><h3 class="eyebrow">Top of the logbook</h3><div class="tops">
         ${air.length ? tile("Most spotted airline", `<span class="sw">${tailSVG(airPlane(air[0][0]))}<span class="v">${esc(air[0][0])}</span></span>`, `${air[0][1]} spots`) : ""}
@@ -433,6 +442,80 @@ function renderStats() {
   $("#stats").querySelectorAll("[data-sel]").forEach(b => b.addEventListener("click", () => select(b.dataset.sel, true)));
 }
 $("#openStats").addEventListener("click", () => { selected = null; renderStats(); openSheet("stats"); syncMap(); if (mapApi) mapApi.setPadding(mapPadding()); });
+
+/* ================= collection album ================= */
+let albumTab = "airlines";
+const tailCard = (liv, on) => `<svg class="tailart" viewBox="0 0 40 44"><path d="M8 42 L15 4 H26 L33 42Z" fill="${on ? liv.tail : "var(--line)"}"/><path d="M11 30 L30 30 L31.5 36 L9.8 36Z" fill="${on ? liv.stripe : "var(--panel-2)"}" opacity=".9"/></svg>`;
+function renderAlbum() {
+  const byAirline = {}, byType = {}, byAirport = {};
+  PLANES.forEach(p => {
+    const al = (p.airline || "").toLowerCase(); if (al) (byAirline[al] = byAirline[al] || []).push(p);
+    const ty = p.icao_type || ""; if (ty) (byType[ty] = byType[ty] || []).push(p);
+    p.sightings.forEach(s => { byAirport[s.airport] = (byAirport[s.airport] || 0) + 1; });
+  });
+  let body = "", got = 0, of = 0;
+  if (albumTab === "airlines") {
+    const shown = new Set();
+    body = albumAirlines().map(({ region, airlines }) => {
+      const uniq = []; airlines.forEach(a => { if (!uniq.find(u => u.name === a.name)) uniq.push(a); });
+      const cards = uniq.map(a => { shown.add(a.name.toLowerCase()); const list = byAirline[a.name.toLowerCase()] || []; of++; if (list.length) got++;
+        return `<div class="acard${list.length ? " got" : ""}">${tailCard(a, list.length)}<b>${list.length ? esc(a.name) : "?"}</b><span>${list.length ? `${list.length} ${list.length === 1 ? "plane" : "planes"}` : esc(a.name)}</span></div>`; }).join("");
+      return `<h4 class="alh">${esc(region)}</h4><div class="agrid">${cards}</div>`;
+    }).join("");
+    const extra = Object.entries(byAirline).filter(([k]) => !shown.has(k));
+    if (extra.length) body += `<h4 class="alh">Other airlines</h4><div class="agrid">${extra.map(([k, list]) => { got++; of++; const liv = liveryFor(list[0]); return `<div class="acard got">${tailCard(liv, true)}<b>${esc(list[0].airline)}</b><span>${list.length} ${list.length === 1 ? "plane" : "planes"}</span></div>`; }).join("")}</div>`;
+  } else if (albumTab === "aircraft") {
+    const shown = new Set();
+    body = albumTypes().reverse().map(({ tier, types }) => {
+      const cards = types.map(ty => { shown.add(ty.code); const list = byType[ty.code] || []; of++; if (list.length) got++;
+        return `<div class="acard tc ${tier}${list.length ? " got" : ""}"><svg class="planeart" viewBox="0 0 24 24"><path d="${PLANE_D}"/></svg><b>${list.length ? esc(ty.name) : "?"}</b><span>${list.length ? `${list.length} spotted` : esc(ty.name)}</span></div>`; }).join("");
+      return `<h4 class="alh"><span class="tier ${tier}">${TIERS[tier].label}</span> ${TIERS[tier].points} points each</h4><div class="agrid">${cards}</div>`;
+    }).join("");
+    const extra = Object.entries(byType).filter(([k]) => !shown.has(k));
+    if (extra.length) body += `<h4 class="alh">Other types</h4><div class="agrid">${extra.map(([k, list]) => { got++; of++; const tier = tierOf(k); return `<div class="acard tc ${tier} got"><svg class="planeart" viewBox="0 0 24 24"><path d="${PLANE_D}"/></svg><b>${esc(list[0].type_name || k)}</b><span>${list.length} spotted</span></div>`; }).join("")}</div>`;
+  } else {
+    const uk = albumAirports(), shown = new Set(uk.map(a => a.code));
+    const card = (code, n, count) => `<div class="acard ap${count ? " got" : ""}"><span class="apcode">${esc(code)}</span><b>${count ? esc(n) : "?"}</b><span>${count ? `${count} ${count === 1 ? "spot" : "spots"}` : esc(n)}</span></div>`;
+    body = `<h4 class="alh">UK & Ireland</h4><div class="agrid">${uk.map(a => { of++; if (byAirport[a.code]) got++; return card(a.code, a.n, byAirport[a.code]); }).join("")}</div>`;
+    const extra = Object.keys(byAirport).filter(c => !shown.has(c));
+    if (extra.length) body += `<h4 class="alh">Further afield</h4><div class="agrid">${extra.map(c => { got++; of++; return card(c, apName(c), byAirport[c]); }).join("")}</div>`;
+  }
+  const R = rankFor(score(PLANES).total);
+  $("#album").innerHTML = `
+    <div class="sh-head"><div><h2>Collection album</h2><div class="sh-sub">${got} of ${of} collected on this page</div></div><button class="icon-btn" data-close type="button" aria-label="Close">${CLOSE_SVG}</button></div>
+    <div class="sh-body">
+      ${rankCard(R)}
+      <div class="seg tabs" role="tablist">${[["airlines", "Airlines"], ["aircraft", "Aircraft"], ["airports", "Airports"]].map(([k, l]) => `<button type="button" role="tab" data-tab="${k}" aria-pressed="${albumTab === k}">${l}</button>`).join("")}</div>
+      <div class="prog"><i style="width:${of ? Math.round(got / of * 100) : 0}%"></i></div>
+      ${body}
+    </div>`;
+  $("#album").querySelectorAll("[data-tab]").forEach(b => b.addEventListener("click", () => { albumTab = b.dataset.tab; renderAlbum(); }));
+}
+$("#openAlbum").addEventListener("click", () => { selected = null; renderAlbum(); openSheet("album"); syncMap(); if (mapApi) mapApi.setPadding(mapPadding()); });
+
+function celebrate(p, sc, rankBefore, rankAfter, wasNew) {
+  if (!p) return;
+  const el = $("#celebrate");
+  const reasons = sc ? sc.reasons : [];
+  const pts = sc ? sc.points : 0;
+  const levelUp = rankAfter.level > rankBefore.level;
+  const tier = tierOf(p.icao_type);
+  const rm = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const confetti = rm ? "" : `<div class="confetti">${Array.from({ length: 28 }, (_, i) => `<i style="left:${(i * 37) % 100}%;animation-delay:${(i % 7) * 0.12}s;background:${["#FFC72C", "#E3177E", "#1F6FD1", "#3FCB7E", "#ffffff"][i % 5]}"></i>`).join("")}</div>`;
+  el.innerHTML = `${confetti}<div class="cel-card">
+      ${levelUp ? `<div class="cel-level">Level up! You're now a <b>${esc(rankAfter.name)}</b></div>` : ""}
+      <div class="cel-reg">${esc(p.reg)}</div>
+      <span class="tier ${tier}">${TIERS[tier].label}</span>
+      <div class="cel-pts">+${pts}<small> points</small></div>
+      <ul>${reasons.map(r => `<li><span>${esc(r.label)}</span><b>+${r.points}</b></li>`).join("")}</ul>
+      <div class="prog big"><i style="width:${Math.round(rankAfter.progress * 100)}%"></i></div>
+      <p class="hint">${rankAfter.next ? `${rankAfter.toNext.toLocaleString("en-GB")} points to ${esc(rankAfter.next.name)}` : "Top rank!"}</p>
+      <button class="btn primary wide" type="button" id="celOk">${wasNew ? "Brilliant!" : "Nice one!"}</button>
+    </div>`;
+  el.hidden = false;
+  $("#celOk").addEventListener("click", () => { el.hidden = true; });
+  $("#celOk").focus();
+}
 
 /* ================= airport panel ================= */
 let apOpen = null, apTimer = null, apLive = null, apHl = null;
@@ -512,7 +595,8 @@ function renderAirport() {
       const bits = [ty ? ty.name : t.type, al].filter(Boolean).join(" · ");
       const miles = Math.round(t.dist * 1.15078 * 10) / 10;
       const nums = ph === "ground" ? "" : `${num(t.alt)} ft · ${miles < 1 ? "under a mile" : miles + " miles"} away`;
-      return `<div class="trow${apHl === t.key ? " hl" : ""}" data-key="${esc(t.key)}"><button class="tmain" type="button" data-fly="${esc(t.key)}"><svg class="tg ${ph}" viewBox="0 0 24 24" style="rotate:${t.track || 0}deg"><path d="${PLANE_D}"/></svg><div><div class="r1">${esc(t.reg || t.callsign || "Unknown")}${mine ? `<em class="minechip">In the logbook</em>` : ""}</div><div class="r2">${esc(bits || "Type unknown")}${routeTxt ? " · " + esc(routeTxt) : ""}</div>${nums ? `<div class="r2">${nums}</div>` : ""}</div></button>${t.reg && canAdd() ? `<button class="btn flat logit" type="button" data-log="${esc(t.reg)}">Log it</button>` : ""}</div>`;
+      const tr = tierOf(t.type), rare = t.type && TIERS[tr].order >= 2;
+      return `<div class="trow${apHl === t.key ? " hl" : ""}" data-key="${esc(t.key)}"><button class="tmain" type="button" data-fly="${esc(t.key)}"><svg class="tg ${ph}" viewBox="0 0 24 24" style="rotate:${t.track || 0}deg"><path d="${PLANE_D}"/></svg><div><div class="r1">${esc(t.reg || t.callsign || "Unknown")}${mine ? `<em class="minechip">In the logbook</em>` : ""}${rare ? `<span class="tier ${tr}">${TIERS[tr].label}</span>` : ""}</div><div class="r2">${esc(bits || "Type unknown")}${routeTxt ? " · " + esc(routeTxt) : ""}</div>${nums ? `<div class="r2">${nums}</div>` : ""}</div></button>${t.reg && canAdd() ? `<button class="btn flat logit" type="button" data-log="${esc(t.reg)}">Log it</button>` : ""}</div>`;
     }).join("")).join("") : `<p class="empty">No planes around the airport right now.</p>`;
     if (L.overhead) traffic += `<p class="hint">Plus ${L.overhead} more flying high overhead.</p>`;
   } else if (L && L.traffic === null) traffic = `<p class="empty">Live planes aren't available right now. Try again in a minute.</p>`;
@@ -525,6 +609,9 @@ function renderAirport() {
       ${wx}
       ${myCount ? `<button class="btn flat" type="button" id="apMine">${myCount} ${myCount === 1 ? "spot" : "spots"} here in the logbook</button>` : ""}
       <section><h3 class="eyebrow">Around the airport now <span class="upd" data-upd></span></h3>${traffic}</section>
+      ${["GB", "IM", "JE", "GG"].includes(ap.c)
+        ? `<p class="hint">There's no live tower radio for UK airports. UK law doesn't allow air traffic control to be streamed online.</p>`
+        : `<a class="btn flat wide" href="https://www.liveatc.net/search/?icao=${encodeURIComponent(ap.i)}" target="_blank" rel="noopener"><svg viewBox="0 0 24 24"><path d="M3 14v-2a9 9 0 0 1 18 0v2"/><rect x="2.5" y="14" width="4" height="6" rx="1.5"/><rect x="17.5" y="14" width="4" height="6" rx="1.5"/></svg>Listen to the tower on LiveATC</a><p class="hint">Opens LiveATC in a new tab. Not every airport has a stream.</p>`}
       <p class="credit">Weather from aviationweather.gov. Planes from adsb.lol. Runway guess based on the wind.</p>
     </div>`;
   const nb = $("#airport .sh-body"); if (nb) nb.scrollTop = st;
@@ -696,6 +783,7 @@ $("#addForm").addEventListener("submit", async e => {
       spot.plane = { type_name: $("#tyIn").value.trim(), airline: typed, airline_icao: icao || null, icao_type: found && found.icao_type, hex: found && found.hex };
     }
     lsSet("spotters.lastAirport", apSel.value);
+    const before = score(PLANES);
     const planeId = await store.addSpot(spot, (i, n) => { btn.textContent = `Uploading ${i} of ${n}…`; });
     const wasNew = !spot.existingPlaneId;
     pending.forEach(m => m.preview && URL.revokeObjectURL(m.preview)); pending = [];
@@ -703,7 +791,9 @@ $("#addForm").addEventListener("submit", async e => {
     await refreshPositions();
     const p = PLANES.find(x => x.id === planeId);
     if (p) select(p.id, true);
-    toast(wasNew ? `${reg} added to your logbook!` : `${reg} spotted again! That's ${p ? spots(p) : "another"} times.`);
+    const after = score(PLANES);
+    const newest = p && p.sightings.slice().sort((a, b) => String(b.created_at || b.id).localeCompare(String(a.created_at || a.id)))[0];
+    celebrate(p, after.bySighting[newest && newest.id], before.rank, after.rank, wasNew);
   } catch (ex) {
     err.textContent = "Couldn't save: " + (ex.message || ex); err.hidden = false;
     btn.disabled = false; btn.textContent = "Save to logbook";
@@ -756,7 +846,8 @@ document.addEventListener("visibilitychange", () => {
 function updBrand() {
   const live = PLANES.filter(p => p.live).length, total = PLANES.reduce((a, p) => a + spots(p), 0);
   const feed = feedState.ok ? `<span class="dot"></span><span>${live} live</span>` : `<span class="feedwarn">Live data unavailable</span>`;
-  $("#brandSub").innerHTML = `<span>${PLANES.length} planes<span class="wide"> · ${total} spots</span></span><span>·</span>${feed}`;
+  const sc = score(PLANES);
+  $("#brandSub").innerHTML = `<span class="ptsline">${sc.total.toLocaleString("en-GB")} pts</span><span>·</span><span class="wide">${PLANES.length} planes · ${total} spots</span><span class="wide">·</span>${feed}`;
 }
 function updClock() {
   const s = Math.round((Date.now() - feedState.at) / 1000);
@@ -775,6 +866,7 @@ async function reload(selectId) {
   if (selectId && PLANES.find(p => p.id === selectId) && $("#detail").classList.contains("open")) renderDetail(PLANES.find(p => p.id === selectId));
   if ($("#logbook").classList.contains("open")) renderList();
   if ($("#stats").classList.contains("open")) renderStats();
+  if ($("#album").classList.contains("open")) renderAlbum();
 }
 
 /* ================= sign in, reset, new password ================= */
