@@ -1,17 +1,17 @@
-import { PLANE_D, AIRPORT_LIST, AIRPORTS, AIRLINES, liveryFor, typeInfo, ICONS, LANDMARKS, CITIES } from './data.js';
+import { PLANE_D, AIRPORT_LIST, AIRPORTS, AIRLINES, liveryFor, typeInfo } from './data.js';
 import { createStore } from './store.js';
 import { preparePhoto, prepareVideo, readExif } from './media.js';
+import { createMap, arc } from './map.js';
 
 const d3 = window.d3, topojson = window.topojson;
-const RM = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
-const D2R = Math.PI / 180, R2D = 180 / Math.PI, EARTH_MI = 3958.8, EARTH_KM = 6371;
+const EARTH_MI = 3958.8, EARTH_KM = 6371;
 const LIVE_MAX_AGE_S = 90;
 
 /* ================= small helpers ================= */
 const $ = s => document.querySelector(s);
 const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmtDate = d => { const x = new Date(d + "T12:00:00"); return isNaN(x) ? d : x.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }); };
-const fmtAgo = m => m < 60 ? `${Math.max(1, Math.round(m))} min ago` : m < 48 * 60 ? `${Math.round(m / 60)} hours ago` : `${Math.round(m / 1440)} days ago`;
+const fmtAgo = m => m < 1.5 ? "just now" : m < 60 ? `${Math.round(m)} min ago` : m < 48 * 60 ? `${Math.round(m / 60)} hours ago` : `${Math.round(m / 1440)} days ago`;
 const agoShort = m => m < 60 ? `${Math.max(1, Math.round(m))}m` : m < 48 * 60 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`;
 const num = n => Math.round(n).toLocaleString("en-GB");
 const todayISO = () => { const d = new Date(); return new Date(d - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); };
@@ -21,13 +21,39 @@ const lsGet = k => { try { return localStorage.getItem(k); } catch (e) { return 
 const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* ignore */ } };
 let toastT;
 function toast(m, ms = 3500) { const t = $("#toast"); t.textContent = m; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => t.hidden = true, ms); }
-const apName = code => AIRPORTS[code] ? AIRPORTS[code].n : code;
+
+/* ================= airports ================= */
+// Bundled list for the "Spotted at" menu, plus ~3,300 airports worldwide for the map (OurAirports).
+let AP_DB = [], AP_BY = {};
+async function loadAirports() {
+  try {
+    AP_DB = await fetch("/data/airports.json").then(r => r.json());
+    AP_DB.forEach(a => { a.key = a.i; AP_BY[a.i] = a; if (a.a) AP_BY[a.a] = AP_BY[a.a] || a; });
+  } catch (e) { AP_DB = []; }
+}
+function getAirport(code) {
+  if (!code) return null;
+  const db = AP_BY[code];
+  if (AIRPORTS[code]) return { code, n: AIRPORTS[code].n, c: AIRPORTS[code].c, db };
+  if (db) return { code, n: db.n.replace(/ (International )?Airport$/i, ""), c: [db.x, db.y], db };
+  return null;
+}
+const apName = code => { const a = getAirport(code); return a ? a.n : code; };
+function nearestAirport(ll, maxKm) {
+  let best = null, bd = Infinity;
+  const list = AP_DB.length ? AP_DB.map(a => [a.a || a.i, a.n, a.y, a.x]) : AIRPORT_LIST;
+  list.forEach(([code, n, lat, lon]) => { const d = d3.geoDistance(ll, [lon, lat]) * EARTH_KM; if (d < bd) { bd = d; best = { code, n }; } });
+  return bd <= maxKm ? best : null;
+}
 
 /* ================= state ================= */
-let store = null, me = null;
+let store = null, me = null, mapApi = null;
 let PLANES = [];
 let feedState = { ok: true, at: 0 };
 let dataLoadedAt = 0;
+let selected = null, filter = "all", showPins = false;
+const isAdmin = () => !!me && me.role === "admin";
+const canAdd = () => !!me && (me.role === "admin" || me.role === "spotter");
 
 const spots = p => p.sightings.length;
 const latest = p => p.sightings.slice().sort((a, b) => b.spotted_on.localeCompare(a.spotted_on))[0];
@@ -35,42 +61,20 @@ const allMedia = p => p.sightings.slice().sort((a, b) => b.spotted_on.localeComp
 const thumbOf = p => { const m = allMedia(p).find(m => m.poster); return m ? m.poster : null; };
 const status = p => p.live ? "live" : p.last ? "last" : "none";
 const lastAgo = p => (Date.now() - p.last.at) / 60000;
+const visible = p => filter === "all" || status(p) === filter;
 function posOf(p) { if (p.live) return [p.live.lon, p.live.lat]; if (p.last) return [p.last.lon, p.last.lat]; return null; }
-function routeOf(p) { return p.live && p.live.route ? p.live.route : null; }
+function onGround(p) { return p.live ? !!p.live.onGround : p.last ? (p.last.onGround || (p.last.alt || 0) < 500) : false; }
 function routeGeo(p) {
-  const r = routeOf(p); if (!r) return null;
+  const r = p.live && p.live.route; if (!r) return null;
   const A = [r.from.lon, r.from.lat], B = [r.to.lon, r.to.lat], pos = posOf(p);
-  const dA = d3.geoDistance(A, pos), dB = d3.geoDistance(pos, B), d = d3.geoDistance(A, B);
-  return { A, B, pos, d, f: dA + dB > 0 ? dA / (dA + dB) : 0, hmax: Math.max(.018, Math.min(.13, .012 + d * .1)) };
-}
-function hOf(p) {
-  if (p.live) {
-    if (p.live.onGround) return 0;
-    const g = routeGeo(p); if (g) return Math.sin(Math.PI * g.f) * g.hmax;
-    return Math.max(.012, Math.min(1, (p.live.alt || 0) / 40000)) * .05;
-  }
-  if (p.last && !p.last.onGround && (p.last.alt || 0) > 500) return .03;
-  return 0;
-}
-function headingOf(p) { return p.live && p.live.track != null ? p.live.track : p.last && p.last.track != null ? p.last.track : 0; }
-function destPoint([lon, lat], brngDeg, distRad) {
-  const b = brngDeg * D2R, f1 = lat * D2R, l1 = lon * D2R;
-  const f2 = Math.asin(Math.sin(f1) * Math.cos(distRad) + Math.cos(f1) * Math.sin(distRad) * Math.cos(b));
-  const l2 = l1 + Math.atan2(Math.sin(b) * Math.sin(distRad) * Math.cos(f1), Math.cos(distRad) - Math.sin(f1) * Math.sin(f2));
-  return [l2 * R2D, f2 * R2D];
-}
-function nearestAirport(ll, maxKm) {
-  let best = null, bd = Infinity;
-  AIRPORT_LIST.forEach(([code, n, lat, lon]) => { const d = d3.geoDistance(ll, [lon, lat]) * EARTH_KM; if (d < bd) { bd = d; best = { code, n }; } });
-  return bd <= maxKm ? best : null;
+  const dA = d3.geoDistance(A, pos), dB = d3.geoDistance(pos, B);
+  return { A, B, pos, d: d3.geoDistance(A, B), f: dA + dB > 0 ? dA / (dA + dB) : 0 };
 }
 
-/* ================= world shapes, place names ================= */
-let landHi, landLo, bordHi, bordLo;
-async function loadWorld() {
-  const [hi, lo] = await Promise.all([fetch("/data/world-hi.json").then(r => r.json()), fetch("/data/world-lo.json").then(r => r.json())]);
-  landHi = topojson.feature(hi, hi.objects.c); landLo = topojson.feature(lo, lo.objects.c);
-  bordHi = topojson.mesh(hi, hi.objects.c, (a, b) => a !== b); bordLo = topojson.mesh(lo, lo.objects.c, (a, b) => a !== b);
+/* ================= place names ================= */
+let landHi = null;
+function loadCountries() {
+  fetch("/data/world-hi.json").then(r => r.json()).then(w => { landHi = topojson.feature(w, w.objects.c); }).catch(() => {});
 }
 const NICE = { "United States of America": "the USA", "United Kingdom": "the UK", "United Arab Emirates": "the UAE", "Netherlands": "the Netherlands", "Czechia": "the Czech Republic", "Dem. Rep. Congo": "the DR Congo", "Central African Rep.": "the Central African Republic", "Philippines": "the Philippines", "Dominican Rep.": "the Dominican Republic", "Bahamas": "the Bahamas" };
 function sea([lon, lat]) {
@@ -92,294 +96,124 @@ function countryAt(ll) { const f = landHi && landHi.features.find(f => d3.geoCon
 const overName = ll => countryAt(ll) || sea(ll);
 function whereText(p) {
   const ll = posOf(p); if (!ll) return "";
-  const ground = p.live ? p.live.onGround : p.last.onGround || (p.last.alt || 0) < 500;
-  if (ground) { const a = nearestAirport(ll, 15); return a ? `On the ground at ${a.n} (${a.code})` : `On the ground in ${countryAt(ll) || "an unknown spot"}`; }
+  if (onGround(p)) { const a = nearestAirport(ll, 15); return a ? `On the ground at ${a.n}` : `On the ground in ${countryAt(ll) || "an unknown spot"}`; }
   return `Over ${overName(ll)}`;
 }
 
-/* ================= globe ================= */
-const stage = $("#stage"), bg = $("#bg"), cv = $("#globe"), markers = $("#markers");
-const ctx = cv.getContext("2d"), bctx = bg.getContext("2d");
-const proj = d3.geoOrthographic().clipAngle(90).precision(.4);
-const path = d3.geoPath(proj, ctx);
-const grat = d3.geoGraticule().step([15, 15])();
-let W = 0, H = 0, DPR = 1, R0 = 200;
-const HOME = { lam: 2, phi: -40 };
-const V = { lam: HOME.lam, phi: HOME.phi, R: 200, cx: 0, cy: 0 };
-let rot = d3.geoRotation([V.lam, V.phi]);
-let selected = null, filter = "all", showPins = false, spin = !RM, dirty = true, interacting = false, lastActive = 0, needHi = false;
-let anim = null, vel = { l: 0, p: 0 }, dragging = false, sun = [0, 0];
-const COL = { glow: "rgba(110,175,240,.55)", route: "#E3177E" };
+/* ================= map ================= */
+function chromeTop() { const r = document.querySelector(".chrome.top").getBoundingClientRect(); return Math.round(r.bottom + 8); }
+function mapPadding() {
+  const open = document.body.classList.contains("sheet-open"), top = chromeTop();
+  if (open && innerWidth >= 768) return { top, right: 440, bottom: 24, left: 24 };
+  if (open) return { top, bottom: Math.round(innerHeight * 0.62), left: 0, right: 0 };
+  return { top, bottom: 24, left: 0, right: 0 };
+}
+function flyTo(ll, zoom) { if (!mapApi || !ll) return; setSpin(false); mapApi.flyTo(ll, zoom, mapPadding()); }
 
-function P(ll, h) {
-  h = h || 0; const r = rot(ll), l = r[0] * D2R, f = r[1] * D2R, cf = Math.cos(f), k = V.R * (1 + h);
-  const x = cf * Math.sin(l), y = Math.sin(f), z = cf * Math.cos(l);
-  return { x: V.cx + k * x, y: V.cy - k * y, z, vis: z >= 0 || Math.hypot(x, y) * (1 + h) > 1.0001 };
-}
-function chromeTop() { const r = document.querySelector(".chrome.top").getBoundingClientRect(); return r.bottom + 8; }
-function home() { const top = chromeTop(); return { cx: W / 2, cy: top + (H - top) / 2 }; }
-function sizeAll() {
-  W = stage.clientWidth; H = stage.clientHeight; DPR = Math.min(2, window.devicePixelRatio || 1);
-  [bg, cv].forEach(c => { c.width = Math.round(W * DPR); c.height = Math.round(H * DPR); });
-  const top = chromeTop(), oldR0 = R0;
-  R0 = Math.max(120, Math.min(W * 0.43, (H - top - 40) * 0.47));
-  V.R = V.R / oldR0 * R0;
-  if (!document.body.classList.contains("sheet-open")) Object.assign(V, home());
-  drawBg(); dirty = true;
-}
-const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
-function drawBg() {
-  COL.glow = css("--glow") || COL.glow; COL.route = css("--route") || COL.route;
-  bctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-  const g = bctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, css("--space-a")); g.addColorStop(1, css("--space-b"));
-  bctx.fillStyle = g; bctx.fillRect(0, 0, W, H);
-  let s = css("--stars") === "1" ? 7 : 11; const rnd = () => (s = (s * 16807) % 2147483647) / 2147483647;
-  if (css("--stars") === "1") {
-    const n = Math.round(W * H / 2600);
-    for (let i = 0; i < n; i++) { const r = rnd() < .92 ? rnd() * .9 + .2 : rnd() * 1.3 + .8; bctx.globalAlpha = .25 + rnd() * .7; bctx.fillStyle = rnd() < .15 ? "#FFE9B8" : "#fff"; bctx.beginPath(); bctx.arc(rnd() * W, rnd() * H, r, 0, 7); bctx.fill(); }
-    bctx.globalAlpha = 1;
-  } else {
-    bctx.fillStyle = "rgba(255,255,255,.55)";
-    for (let i = 0; i < 9; i++) { const x = rnd() * W, y = rnd() * H, w = 60 + rnd() * 140; for (let j = 0; j < 4; j++) { bctx.beginPath(); bctx.ellipse(x + j * w * .28, y + (j % 2 ? -6 : 4), w * .3, w * .12, 0, 0, 7); bctx.fill(); } }
-  }
-}
-function sunPos(d) {
-  const start = Date.UTC(d.getUTCFullYear(), 0, 0), day = (d - start) / 864e5, g = 2 * Math.PI / 365 * (day - 1);
-  const decl = .006918 - .399912 * Math.cos(g) + .070257 * Math.sin(g) - .006758 * Math.cos(2 * g) + .000907 * Math.sin(2 * g) - .002697 * Math.cos(3 * g) + .00148 * Math.sin(3 * g);
-  const eqt = 229.18 * (.000075 + .001868 * Math.cos(g) - .032077 * Math.sin(g) - .014615 * Math.cos(2 * g) - .040849 * Math.sin(2 * g));
-  let lon = -(d.getUTCHours() * 60 + d.getUTCMinutes() + eqt - 720) / 4; lon = ((lon + 540) % 360) - 180;
-  return [lon, decl * R2D];
-}
-sun = sunPos(new Date());
-const visible = p => filter === "all" || status(p) === filter;
-
-function strokePts(pts) {
-  ctx.beginPath(); let on = false;
-  for (const q of pts) { if (q.vis) { if (on) ctx.lineTo(q.x, q.y); else { ctx.moveTo(q.x, q.y); on = true; } } else on = false; }
-  ctx.stroke();
-}
-function render(lo) {
-  rot = d3.geoRotation([V.lam, V.phi]);
-  proj.rotate([V.lam, V.phi]).scale(V.R).translate([V.cx, V.cy]);
-  ctx.setTransform(DPR, 0, 0, DPR, 0, 0); ctx.clearRect(0, 0, W, H);
-  const { cx, cy, R } = V;
-  const gl = ctx.createRadialGradient(cx, cy, R * .92, cx, cy, R * 1.16); gl.addColorStop(0, COL.glow); gl.addColorStop(1, "rgba(80,150,255,0)");
-  ctx.fillStyle = gl; ctx.beginPath(); ctx.arc(cx, cy, R * 1.16, 0, 7); ctx.fill();
-  const oc = ctx.createRadialGradient(cx - R * .3, cy - R * .35, R * .1, cx, cy, R); oc.addColorStop(0, "#4FA3E0"); oc.addColorStop(.7, "#1F6BB0"); oc.addColorStop(1, "#0F477F");
-  ctx.fillStyle = oc; ctx.beginPath(); ctx.arc(cx, cy, R, 0, 7); ctx.fill();
-  ctx.beginPath(); path(grat); ctx.strokeStyle = "rgba(255,255,255,.12)"; ctx.lineWidth = .7; ctx.stroke();
-  if (landHi) {
-    const land = lo ? landLo : landHi, bord = lo ? bordLo : bordHi;
-    ctx.beginPath(); path(land); ctx.fillStyle = "#86BE6C"; ctx.fill();
-    ctx.beginPath(); path(land); ctx.strokeStyle = "rgba(40,90,45,.55)"; ctx.lineWidth = .6; ctx.stroke();
-    ctx.beginPath(); path(bord); ctx.strokeStyle = "rgba(255,255,255,.45)"; ctx.lineWidth = .6; ctx.stroke();
-  }
-  const anti = [sun[0] + 180, -sun[1]];
-  [[89.6, .12]].concat(d3.range(88, 74, -2).map(r => [r, .055])).forEach(([r, a]) => { ctx.beginPath(); path(d3.geoCircle().center(anti).radius(r)()); ctx.fillStyle = `rgba(3,10,40,${a})`; ctx.fill(); });
-  const li = ctx.createRadialGradient(cx - R * .4, cy - R * .45, 0, cx, cy, R * 1.05); li.addColorStop(0, "rgba(255,255,255,.22)"); li.addColorStop(.45, "rgba(255,255,255,0)"); li.addColorStop(1, "rgba(0,12,40,.42)");
-  ctx.fillStyle = li; ctx.beginPath(); ctx.arc(cx, cy, R, 0, 7); ctx.fill();
-
+function syncMap() {
+  if (!mapApi) return;
   const sel = PLANES.find(p => p.id === selected);
-  if (sel && posOf(sel) && AIRPORTS[latest(sel).airport]) {
-    const I = d3.geoInterpolate(AIRPORTS[latest(sel).airport].c, posOf(sel)); const pts = d3.range(41).map(i => P(I(i / 40), 0));
-    ctx.setLineDash([2, 5]); ctx.lineWidth = 2; ctx.strokeStyle = "rgba(255,255,255,.85)"; strokePts(pts); ctx.setLineDash([]);
+  mapApi.setPlanes(PLANES.filter(p => posOf(p)).map(p => {
+    const st = status(p);
+    return {
+      id: p.id, ll: posOf(p), status: st, sel: p.id === selected, dim: !!selected && p.id !== selected,
+      show: visible(p), track: p.live ? p.live.track : p.last ? p.last.track : 0,
+      label: p.reg + (st === "last" ? ` · ${agoShort(lastAgo(p))} ago` : ""),
+      aria: `${p.reg}, ${st === "live" ? "broadcasting now" : "last seen " + fmtAgo(lastAgo(p))}`
+    };
+  }));
+  const feats = [];
+  PLANES.forEach(p => {
+    const g = routeGeo(p); if (!g || !visible(p) || p.live.onGround) return;
+    const flown = arc(g.A, g.pos, 48), next = arc(g.pos, g.B, 48);
+    const shift = flown[flown.length - 1][0] - next[0][0];
+    if (shift) next.forEach(q => { q[0] += shift; });
+    const props = { sel: p.id === selected, dim: !!selected && p.id !== selected };
+    feats.push({ type: "Feature", properties: { ...props, k: "flown" }, geometry: { type: "LineString", coordinates: flown } });
+    feats.push({ type: "Feature", properties: { ...props, k: "next" }, geometry: { type: "LineString", coordinates: next } });
+  });
+  mapApi.setRoutes(feats);
+  const spotAp = sel && getAirport(latest(sel).airport);
+  const g = sel && routeGeo(sel);
+  const sameAsOrigin = g && spotAp && d3.geoDistance(spotAp.c, g.A) * EARTH_KM < 40;
+  mapApi.setSpotLine(sel && spotAp && posOf(sel) && !sameAsOrigin ? arc(spotAp.c, posOf(sel), 40) : null);
+  const counts = {};
+  PLANES.forEach(p => p.sightings.forEach(s => { counts[s.airport] = (counts[s.airport] || 0) + 1; }));
+  mapApi.setPins(Object.keys(counts).map(code => { const a = getAirport(code); return a ? { code, ll: a.c, count: counts[code], name: a.n, show: showPins || !!(sel && sel.sightings.some(s => s.airport === code)) } : null; }).filter(Boolean));
+  const mine = new Set(); Object.keys(counts).forEach(c => { const a = getAirport(c); if (a && a.db) mine.add(a.db.i); });
+  mapApi.setAirports(AP_DB.map(a => ({ type: "Feature", properties: { key: a.i, code: a.a || a.i, name: a.n.replace(/ (International )?Airport$/i, ""), s: a.s, mine: mine.has(a.i) }, geometry: { type: "Point", coordinates: [a.x, a.y] } })));
+}
+
+let spinOn = !(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches);
+function setSpin(on) { spinOn = on; $("#spin").setAttribute("aria-pressed", String(on)); if (mapApi) mapApi.setSpin(on); }
+
+async function initMap() {
+  const mode = lsGet("spotters.mapMode") === "satellite" ? "satellite" : "map";
+  updStyleBtn(mode);
+  try {
+    mapApi = await createMap({
+      container: $("#map"), mode, spin: spinOn, styleUrl: window.SPOTTERS_MAP_STYLE,
+      onPlane: id => select(id, true),
+      onAirport: key => openAirport(AP_BY[key]),
+      onPin: code => openLogbook(code),
+      onTraffic: key => highlightTraffic(key, true),
+      onBackground: () => { if (document.body.classList.contains("sheet-open")) closeSheets(); },
+      onSpinStop: () => { spinOn = false; $("#spin").setAttribute("aria-pressed", "false"); }
+    });
+    mapApi.onReady(() => syncMap());
+    syncMap();
+  } catch (e) {
+    toast(e.message, 8000);
   }
-  PLANES.forEach(p => {
-    const g = routeGeo(p); if (!g || !visible(p)) return;
-    const isSel = p.id === selected, dim = selected && !isSel, N = 60;
-    const IA = d3.geoInterpolate(g.A, g.pos), IB = d3.geoInterpolate(g.pos, g.B);
-    const flownG = [], flownA = [], nextG = [], nextA = [];
-    for (let i = 0; i <= N; i++) {
-      const t = i / N, fa = t * g.f, fb = g.f + t * (1 - g.f);
-      const a = IA(t), b = IB(t);
-      flownG.push(P(a, 0)); flownA.push(P(a, Math.sin(Math.PI * fa) * g.hmax));
-      nextG.push(P(b, 0)); nextA.push(P(b, Math.sin(Math.PI * fb) * g.hmax));
-    }
-    ctx.globalAlpha = dim ? .25 : 1;
-    ctx.setLineDash([3, 4]); ctx.lineWidth = 1.3; ctx.strokeStyle = "rgba(0,15,35,.45)"; strokePts(flownG.concat(nextG)); ctx.setLineDash([]);
-    ctx.lineCap = "round"; ctx.shadowColor = COL.route; ctx.shadowBlur = isSel ? 10 : 5;
-    ctx.strokeStyle = COL.route; ctx.lineWidth = isSel ? 3.6 : 2.6; strokePts(flownA);
-    ctx.shadowBlur = 0; ctx.setLineDash([3, 6]); ctx.lineWidth = isSel ? 2.6 : 2; ctx.globalAlpha = (dim ? .25 : 1) * .85;
-    strokePts(nextA); ctx.setLineDash([]); ctx.globalAlpha = 1;
-  });
-  PLANES.forEach(p => {
-    const ll = posOf(p); if (!ll || !visible(p)) return; const h = hOf(p); if (h <= 0) return;
-    const g = P(ll, 0), a = P(ll, h); if (!g.vis) return;
-    ctx.globalAlpha = selected && p.id !== selected ? .3 : 1;
-    ctx.fillStyle = "rgba(0,10,30,.4)"; ctx.beginPath(); ctx.ellipse(g.x, g.y, 6, 3.2, 0, 0, 7); ctx.fill();
-    if (a.vis) { ctx.setLineDash([1.5, 3]); ctx.strokeStyle = "rgba(255,255,255,.75)"; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.moveTo(g.x, g.y); ctx.lineTo(a.x, a.y); ctx.stroke(); ctx.setLineDash([]); }
-    ctx.globalAlpha = 1;
-  });
-  place();
 }
-
-/* ================= HTML markers ================= */
-function buildMarkers() {
-  markers.innerHTML = "";
-  CITIES.forEach(c => { const e = document.createElement("div"); e.className = "city t" + Math.min(c[3], 3); e.innerHTML = `<i></i><span>${c[0]}</span>`; e._ll = [c[1], c[2]]; e._tier = c[3]; e._kind = "city"; markers.appendChild(e); });
-  LANDMARKS.forEach((m, i) => {
-    const e = document.createElement("button"); e.type = "button"; e.className = "lm" + (m.aero ? " aero" : ""); e.setAttribute("aria-label", m.n);
-    e.innerHTML = `<span class="ic"><svg viewBox="0 0 24 24">${ICONS[m.ic]}</svg></span><span class="nm">${esc(m.n)}</span>`; e._ll = m.c; e._kind = "lm"; e._i = i;
-    e.addEventListener("click", ev => { ev.stopPropagation(); showFact(i); }); markers.appendChild(e);
-  });
-  const counts = {}; PLANES.forEach(p => p.sightings.forEach(s => { if (AIRPORTS[s.airport]) counts[s.airport] = (counts[s.airport] || 0) + 1; }));
-  Object.keys(counts).forEach(code => {
-    const e = document.createElement("button"); e.type = "button"; e.className = "pin"; e.dataset.ap = code;
-    e.setAttribute("aria-label", `${apName(code)}: ${counts[code]} spots`);
-    e.innerHTML = `<span class="head"><svg viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="12" rx="2.5"/><circle cx="12" cy="13" r="3"/></svg></span><span class="lbl">${code} · ${counts[code]}</span>`;
-    e._ll = AIRPORTS[code].c; e._kind = "pin"; e.addEventListener("click", ev => { ev.stopPropagation(); openLogbook(code); }); markers.appendChild(e);
-  });
-  PLANES.forEach(p => {
-    const e = document.createElement("button"); e.type = "button"; e._kind = "pl"; e._p = p;
-    e.innerHTML = `<span class="hit"></span><span class="ring"></span><svg class="glyph" viewBox="0 0 24 24"><path d="${PLANE_D}"/></svg><span class="tag"></span>`;
-    e.addEventListener("click", ev => { ev.stopPropagation(); select(p.id, true); });
-    markers.appendChild(e); p._el = e;
-  });
-  refreshMarkerLabels();
-  dirty = true;
+function updStyleBtn(mode) {
+  const b = $("#styleBtn");
+  b.setAttribute("aria-label", mode === "satellite" ? "Switch to map view" : "Switch to satellite view");
+  b.classList.toggle("sat", mode === "satellite");
 }
-function refreshMarkerLabels() {
-  PLANES.forEach(p => {
-    const e = p._el; if (!e) return; const st = status(p);
-    e.className = "pl " + st;
-    const txt = esc(p.reg) + (st === "last" ? ` · ${agoShort(lastAgo(p))} ago` : "");
-    const tag = e.querySelector(".tag"); if (tag.innerHTML !== txt) { tag.innerHTML = txt; e._w = 0; }
-    e.setAttribute("aria-label", `${p.reg}, ${st === "live" ? "broadcasting now" : st === "last" ? "last seen " + fmtAgo(lastAgo(p)) : "no position yet"}`);
-  });
-}
-const overlap = (r, boxes) => boxes.some(o => r.x < o.x + o.w && r.x + r.w > o.x && r.y < o.y + o.h && r.y + r.h > o.y);
-function wOf(e, sel) { if (!e._w) { const s = e.querySelector(sel); e._w = s && s.offsetWidth ? s.offsetWidth : 80; } return e._w; }
-function show(e, x, y) { e.hidden = false; e.style.transform = `translate(${x.toFixed(1)}px,${y.toFixed(1)}px)`; }
-function place() {
-  const boxes = [], zoomK = V.R / R0, sel = PLANES.find(p => p.id === selected), kids = [...markers.children];
-  kids.filter(e => e._kind === "pl").sort((a, b) => (b._p.id === selected) - (a._p.id === selected) || (status(a._p) === "live" ? -1 : 1)).forEach(e => {
-    const p = e._p, ll = posOf(p); if (!ll || !visible(p)) { e.hidden = true; return; }
-    const h = hOf(p), q = P(ll, h); if (!q.vis) { e.hidden = true; return; }
-    const ahead = P(destPoint(ll, headingOf(p), .01), h);
-    let ang = Math.atan2(ahead.y - q.y, ahead.x - q.x) * R2D + 90; if (!isFinite(ang)) ang = 0;
-    show(e, q.x, q.y); e.querySelector(".glyph").style.rotate = ang.toFixed(1) + "deg";
-    e.classList.toggle("sel", p.id === selected); e.classList.toggle("dim", !!selected && p.id !== selected);
-    const tag = e.querySelector(".tag"), r = { x: q.x + 16, y: q.y - 13, w: wOf(e, ".tag") + 4, h: 26 };
-    const ok = p.id === selected || !overlap(r, boxes); tag.classList.toggle("off", !ok); if (ok) boxes.push(r);
-    boxes.push({ x: q.x - 14, y: q.y - 14, w: 28, h: 28 });
-  });
-  kids.filter(e => e._kind === "pin").forEach(e => {
-    const on = showPins || (sel && sel.sightings.some(s => s.airport === e.dataset.ap)); const q = P(e._ll, 0);
-    if (!on || !q.vis || q.z < .05) { e.hidden = true; return; }
-    show(e, q.x, q.y); const r = { x: q.x + 14, y: q.y - 36, w: wOf(e, ".lbl") + 2, h: 20 };
-    e.querySelector(".lbl").classList.toggle("off", overlap(r, boxes)); boxes.push(r, { x: q.x - 14, y: q.y - 38, w: 28, h: 30 });
-  });
-  kids.filter(e => e._kind === "lm").forEach(e => {
-    const q = P(e._ll, 0); if (!q.vis || q.z < .12) { e.hidden = true; return; }
-    const ic = { x: q.x - 15, y: q.y - 15, w: 30, h: 30 };
-    if (overlap(ic, boxes) && zoomK < 2.2) { e.hidden = true; return; }
-    show(e, q.x, q.y); boxes.push(ic);
-    const r = { x: q.x + 17, y: q.y - 10, w: wOf(e, ".nm"), h: 18 };
-    const ok = zoomK >= 1.9 && !overlap(r, boxes); e.querySelector(".nm").classList.toggle("off", !ok); if (ok) boxes.push(r);
-  });
-  kids.filter(e => e._kind === "city").forEach(e => {
-    const need = [0, 0, 1.9, 3.6, 7][e._tier]; const q = P(e._ll, 0);
-    if (zoomK < need || !q.vis || q.z < .1) { e.hidden = true; return; }
-    const r = { x: q.x - 3, y: q.y - 9, w: wOf(e, "span") + 10, h: 18 };
-    if (overlap(r, boxes)) { e.hidden = true; return; }
-    show(e, q.x, q.y); boxes.push(r);
-  });
-}
-
-/* ================= touch, mouse, animation ================= */
-const ptrs = new Map(); let moved = 0, pinch = null, lastPt = null;
-stage.addEventListener("pointerdown", e => {
-  ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY }); anim = null; vel = { l: 0, p: 0 };
-  if (ptrs.size === 1) { moved = 0; lastPt = { x: e.clientX, y: e.clientY, t: performance.now() }; }
-  if (ptrs.size === 2) { const [a, b] = [...ptrs.values()]; pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), R: V.R }; }
+$("#styleBtn").addEventListener("click", () => {
+  if (!mapApi) return;
+  const next = mapApi.mode === "satellite" ? "map" : "satellite";
+  mapApi.setMode(next); lsSet("spotters.mapMode", next); updStyleBtn(next);
+  toast(next === "satellite" ? "Satellite view" : "Map view", 1500);
 });
-window.addEventListener("pointermove", e => {
-  if (!ptrs.has(e.pointerId)) return;
-  const prev = ptrs.get(e.pointerId); ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
-  if (ptrs.size === 2 && pinch) { const [a, b] = [...ptrs.values()]; V.R = clampR(pinch.R * Math.hypot(a.x - b.x, a.y - b.y) / pinch.d); moved += 10; stopSpin(); markActive(); return; }
-  if (ptrs.size !== 1) return;
-  const dx = e.clientX - prev.x, dy = e.clientY - prev.y; moved += Math.abs(dx) + Math.abs(dy);
-  if (moved < 6) return;
-  if (!dragging) { dragging = true; stage.classList.add("dragging"); stopSpin(); }
-  const k = R2D / V.R * 1.05;
-  V.lam += dx * k; V.phi = Math.max(-85, Math.min(85, V.phi - dy * k));
-  const now = performance.now(), dt = Math.max(1, now - lastPt.t); vel = { l: dx * k / dt * 16, p: -dy * k / dt * 16 }; lastPt = { x: e.clientX, y: e.clientY, t: now };
-  markActive();
-});
-function endPtr(e) {
-  if (!ptrs.has(e.pointerId)) return; ptrs.delete(e.pointerId);
-  if (ptrs.size < 2) pinch = null;
-  if (ptrs.size === 0) { if (performance.now() - (lastPt ? lastPt.t : 0) > 80) vel = { l: 0, p: 0 }; setTimeout(() => { dragging = false; stage.classList.remove("dragging"); }, 0); }
-}
-window.addEventListener("pointerup", endPtr); window.addEventListener("pointercancel", endPtr);
-stage.addEventListener("click", e => { if (moved >= 6) { e.stopPropagation(); e.preventDefault(); moved = 0; } }, true);
-stage.addEventListener("click", e => { if (e.target === cv) { hideFact(); closeSheets(); } });
-stage.addEventListener("wheel", e => { e.preventDefault(); anim = null; V.R = clampR(V.R * Math.exp(-e.deltaY * .0018)); markActive(); }, { passive: false });
-const clampR = r => Math.max(R0 * .75, Math.min(R0 * 24, r));
-function markActive() { dirty = true; interacting = true; lastActive = performance.now(); }
-function stopSpin() { if (spin) { spin = false; $("#spin").setAttribute("aria-pressed", "false"); } }
-function animateTo(target, ms) {
-  const from = { ...V }; const dl = ((target.lam - from.lam) % 360 + 540) % 360 - 180;
-  anim = { from, to: { lam: from.lam + dl, phi: target.phi, R: target.R, cx: target.cx, cy: target.cy }, t0: performance.now(), ms: RM ? 1 : ms || 1100 };
-  vel = { l: 0, p: 0 };
-}
-function focusXY() {
-  const open = document.body.classList.contains("sheet-open");
-  if (open && W >= 768) return { cx: (W - 430) / 2, cy: H / 2 };
-  if (open) return { cx: W / 2, cy: H * .25 };
-  return home();
-}
-function flyTo(ll, zoom) { stopSpin(); animateTo({ lam: -ll[0], phi: -ll[1], R: clampR(R0 * zoom), ...focusXY() }); }
-function flyHome() { animateTo({ ...HOME, R: R0, ...home() }); }
-function frame(t) {
-  let moving = false;
-  if (anim) {
-    const k = Math.min(1, (t - anim.t0) / anim.ms), e = d3.easeCubicInOut(k);
-    for (const key of ["lam", "phi", "R", "cx", "cy"]) V[key] = anim.from[key] + (anim.to[key] - anim.from[key]) * e;
-    const hop = Math.abs(anim.to.lam - anim.from.lam) + Math.abs(anim.to.phi - anim.from.phi);
-    if (hop > 40) V.R *= 1 - Math.sin(Math.PI * e) * Math.min(.35, hop / 400);
-    moving = true; if (k >= 1) anim = null;
-  } else if (!dragging && (Math.abs(vel.l) > .01 || Math.abs(vel.p) > .01)) {
-    V.lam += vel.l; V.phi = Math.max(-85, Math.min(85, V.phi + vel.p)); vel.l *= .93; vel.p *= .93; moving = true;
-  } else if (spin && !dragging && !selected && ptrs.size === 0 && !document.body.classList.contains("sheet-open")) { V.lam += .06; moving = true; }
-  if (moving) { dirty = true; interacting = true; lastActive = t; }
-  if (dirty) { render(interacting); dirty = false; needHi = interacting; interacting = false; }
-  else if (needHi && t - lastActive > 160) { render(false); needHi = false; }
-  requestAnimationFrame(frame);
-}
-
-/* ================= landmark facts, welcome ================= */
-function showFact(i) {
-  const m = LANDMARKS[i]; closeSheets(true);
-  const f = $("#fact");
-  f.innerHTML = `<div class="fi"><svg viewBox="0 0 24 24">${ICONS[m.ic]}</svg></div><div><div class="kid">${m.aero ? "Aviation history" : "Did you know?"}</div><h3>${esc(m.n)}</h3><div class="pl2">${esc(m.pl)}</div><p>${esc(m.f)}</p></div><button class="icon-btn" type="button" id="factX" aria-label="Close fact">${CLOSE_SVG}</button>`;
-  f.hidden = false; document.body.classList.add("fact-open"); $("#legend").open = false; $("#welcome").hidden = true;
-  $("#factX").addEventListener("click", hideFact);
-  markers.querySelectorAll(".lm").forEach(e => e.classList.toggle("on", e._i === i));
-  flyTo(m.c, Math.max(V.R / R0, 3.2));
-}
-function hideFact() { $("#fact").hidden = true; document.body.classList.remove("fact-open"); markers.querySelectorAll(".lm.on").forEach(e => e.classList.remove("on")); updWelcome(); }
-function updWelcome() { $("#welcome").hidden = PLANES.length > 0 || document.body.classList.contains("sheet-open") || !$("#fact").hidden; }
-$("#welcomeAdd").addEventListener("click", () => openAdd());
+$("#zin").addEventListener("click", () => mapApi && mapApi.zoomBy(1));
+$("#zout").addEventListener("click", () => mapApi && mapApi.zoomBy(-1));
+$("#zfit").addEventListener("click", () => { closeSheets(true); mapApi && mapApi.flyHome(mapPadding()); });
+$("#spin").addEventListener("click", () => { const on = !spinOn; if (on) { closeSheets(true); mapApi && mapApi.flyHome(mapPadding()); setTimeout(() => setSpin(true), 1600); } else setSpin(false); });
+document.querySelectorAll(".seg [data-f]").forEach(b => b.addEventListener("click", () => {
+  filter = b.dataset.f; document.querySelectorAll(".seg [data-f]").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+  const s = PLANES.find(p => p.id === selected); if (s && !visible(s)) closeSheets();
+  syncMap();
+}));
+$("#pinToggle").addEventListener("click", e => { showPins = !showPins; e.currentTarget.setAttribute("aria-pressed", String(showPins)); syncMap(); });
 
 /* ================= panels ================= */
+function updWelcome() {
+  const w = $("#welcome");
+  w.hidden = PLANES.length > 0 || !me || document.body.classList.contains("sheet-open");
+  $("#welcomeTitle").textContent = canAdd() ? "Your globe is waiting" : "Nothing to see yet";
+  $("#welcomeText").textContent = canAdd() ? "Log your first plane and it'll appear here, wherever it is in the world." : "No planes have been logged yet. Check back soon.";
+}
 function openSheet(id) {
-  hideFact();
   document.querySelectorAll(".sheet").forEach(s => s.classList.toggle("open", s.id === id));
   document.body.classList.add("sheet-open"); updWelcome();
+  if (id !== "airport") stopAirport();
   const b = document.querySelector(`#${id} [data-close]`); if (b) setTimeout(() => b.focus({ preventScroll: true }), 60);
 }
 function closeSheets(keepView) {
   const was = document.body.classList.contains("sheet-open");
   document.querySelectorAll(".sheet").forEach(s => s.classList.remove("open"));
   document.body.classList.remove("sheet-open");
-  if (selected) { selected = null; dirty = true; }
-  if (was && !keepView) animateTo({ lam: V.lam, phi: V.phi, R: V.R, ...home() }, 500);
+  stopAirport();
+  if (selected) { selected = null; syncMap(); }
+  if (was && !keepView && mapApi) mapApi.setPadding(mapPadding());
   updWelcome();
 }
 document.addEventListener("click", e => { if (e.target.closest("[data-close]")) closeSheets(); });
-document.addEventListener("keydown", e => { if (e.key === "Escape") { if (!$("#lightbox").hidden) closeLightbox(); else if (!$("#fact").hidden) hideFact(); else closeSheets(); } });
+document.addEventListener("keydown", e => { if (e.key === "Escape") { if (!$("#lightbox").hidden) closeLightbox(); else closeSheets(); } });
 
+/* ================= plane detail ================= */
 const busSVG = '<svg viewBox="0 0 18 11"><rect x=".5" y=".5" width="17" height="8.5" rx="1.6" fill="#D2232A"/><rect x="2" y="2" width="14" height="2.2" fill="#fff" opacity=".85"/><rect x="2" y="5.4" width="14" height="2" fill="#fff" opacity=".6"/><circle cx="4.5" cy="9.5" r="1.3" fill="#222"/><circle cx="13.5" cy="9.5" r="1.3" fill="#222"/></svg>';
 function statusBlock(p) {
   if (p.live) {
@@ -409,13 +243,13 @@ function statusBlock(p) {
     return `<section class="status last">
       <div class="st-top"><span class="pill last">${ICON_CLOCK}Last seen ${fmtAgo(lastAgo(p))}</span></div>
       <p class="where">${esc(whereText(p))}${!p.last.onGround && p.last.alt ? ` · ${num(p.last.alt)} ft` : ""}</p>
-      <p class="expl">It isn't broadcasting right now, so the globe shows where it was last heard. ${p.last.onGround ? "It's probably parked between flights." : "It's flying where no receivers can hear it, and will pop back up when it's in range."}</p>
+      <p class="expl">It isn't broadcasting right now, so the map shows where it was last heard. ${onGround(p) ? "It's probably parked between flights." : "It's flying where no receivers can hear it, and will pop back up when it's in range."}</p>
     </section>`;
   }
-  return `<section class="status none"><div class="st-top"><span class="pill none">No position yet</span></div><p class="expl">We haven't heard this plane since you logged it. It'll appear on the globe as soon as it starts broadcasting.</p></section>`;
+  return `<section class="status none"><div class="st-top"><span class="pill none">No position yet</span></div><p class="expl">We haven't heard this plane since it was logged. It'll appear on the map as soon as it starts broadcasting.</p></section>`;
 }
 function renderDetail(p) {
-  const media = allMedia(p), ty = typeInfo(p.icao_type), n = spots(p), admin = me && me.role === "admin";
+  const media = allMedia(p), ty = typeInfo(p.icao_type), n = spots(p), admin = isAdmin();
   const tiles = media.map((m, i) => {
     const dt = `<span class="dt">${fmtDate(m.date)}</span>`;
     if (m.kind === "video") return `<button class="mtile" type="button" data-m="${i}" aria-label="Play video">${m.poster ? `<img src="${m.poster}" alt="" loading="lazy">` : ""}<span class="play"><span><svg viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z"/></svg></span></span>${dt}</button>`;
@@ -423,6 +257,7 @@ function renderDetail(p) {
   }).join("");
   const sights = p.sightings.slice().sort((a, b) => b.spotted_on.localeCompare(a.spotted_on)).map(s => `<li><span class="nd"></span><div><b>${esc(apName(s.airport))}</b> <span class="m">${fmtDate(s.spotted_on)}</span>${s.note ? `<q>${esc(s.note)}</q>` : ""}${admin ? `<div class="acts"><button class="mini del" type="button" data-dels="${s.id}">Delete this spot</button></div>` : ""}</div></li>`).join("");
   const buses = ty ? Math.round(ty.span / 11.2 * 2) / 2 : 0;
+  const spotAp = getAirport(latest(p).airport);
   $("#detail").innerHTML = `
     <div class="sh-head"><div><div class="reg">${esc(p.reg)}</div><div class="sh-sub">${esc(p.type_name || "Type not set")} · ${esc(p.airline || "Airline not set")}</div></div>
       <button class="icon-btn" data-close type="button" aria-label="Close">${CLOSE_SVG}</button></div>
@@ -435,23 +270,23 @@ function renderDetail(p) {
         <div><dt>Seats</dt><dd>${esc(ty.seats)}<small>${ty.wide ? "Wide-body: two aisles" : "Narrow-body: one aisle"}</small></dd></div></dl>
         <p class="didyou"><b>Did you know?</b>${esc(ty.fact)}</p></section>` : ""}
       <div class="btnrow">
-        ${AIRPORTS[latest(p).airport] ? `<button class="btn flat" type="button" data-go="spot"><svg viewBox="0 0 24 24"><path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg>Where I saw it</button>` : ""}
+        ${spotAp ? `<button class="btn flat" type="button" data-go="spot"><svg viewBox="0 0 24 24"><path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg>Where I saw it</button>` : ""}
         ${posOf(p) ? `<button class="btn flat" type="button" data-go="plane"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>${p.live ? "Where it is now" : "Last position"}</button>` : ""}
       </div>
       ${admin ? `<div class="btnrow"><button class="btn danger" type="button" data-delp>Delete ${esc(p.reg)} from the logbook</button></div>` : ""}
     </div>`;
   const d = $("#detail");
   d.querySelectorAll("[data-m]").forEach(b => b.addEventListener("click", () => openLightbox(media[+b.dataset.m])));
-  const gs = d.querySelector('[data-go="spot"]'); if (gs) gs.addEventListener("click", () => flyTo(AIRPORTS[latest(p).airport].c, 9));
-  const gp = d.querySelector('[data-go="plane"]'); if (gp) gp.addEventListener("click", () => flyTo(posOf(p), Math.max(V.R / R0, 3)));
+  const gs = d.querySelector('[data-go="spot"]'); if (gs) gs.addEventListener("click", () => flyTo(spotAp.c, 12));
+  const gp = d.querySelector('[data-go="plane"]'); if (gp) gp.addEventListener("click", () => flyTo(posOf(p), onGround(p) ? 13 : 7));
   d.querySelectorAll("[data-dels]").forEach(b => b.addEventListener("click", () => deleteSighting(p, p.sightings.find(s => s.id === b.dataset.dels))));
   const dp = d.querySelector("[data-delp]"); if (dp) dp.addEventListener("click", () => deletePlane(p));
   updClock();
 }
 function select(id, fly) {
   const p = PLANES.find(x => x.id === id); if (!p) return;
-  selected = id; renderDetail(p); openSheet("detail"); dirty = true;
-  if (fly) { const ll = posOf(p) || (AIRPORTS[latest(p).airport] || {}).c; if (ll) flyTo(ll, posOf(p) ? (p.live && !p.live.onGround ? 2.4 : 3.2) : 6); }
+  selected = id; renderDetail(p); openSheet("detail"); syncMap();
+  if (fly) { const ll = posOf(p) || (getAirport(latest(p).airport) || {}).c; if (ll) flyTo(ll, !posOf(p) ? 10 : onGround(p) ? 12 : 4.2); }
 }
 
 /* ================= photo / video viewer ================= */
@@ -459,10 +294,9 @@ let lbItem = null;
 function openLightbox(m) {
   lbItem = m;
   const body = $("#lbBody");
-  if (m.kind === "video") {
-    body.innerHTML = m.url ? `<video src="${m.url}" controls playsinline autoplay ${m.poster ? `poster="${m.poster}"` : ""}></video>` : `<p style="color:#fff">This is a sample video, so there's nothing to play.</p>`;
-  } else body.innerHTML = `<img src="${m.url || m.poster}" alt="">`;
-  $("#lbDel").hidden = !(me && me.role === "admin") || m.sample;
+  if (m.kind === "video") body.innerHTML = m.url ? `<video src="${m.url}" controls playsinline autoplay ${m.poster ? `poster="${m.poster}"` : ""}></video>` : `<p style="color:#fff">This is a sample video, so there's nothing to play.</p>`;
+  else body.innerHTML = `<img src="${m.url || m.poster}" alt="">`;
+  $("#lbDel").hidden = !isAdmin() || m.sample;
   $("#lightbox").hidden = false;
 }
 function closeLightbox() { $("#lightbox").hidden = true; $("#lbBody").innerHTML = ""; lbItem = null; }
@@ -470,7 +304,8 @@ $("#lbClose").addEventListener("click", closeLightbox);
 $("#lightbox").addEventListener("click", e => { if (e.target.id === "lightbox" || e.target.id === "lbBody") closeLightbox(); });
 $("#lbDel").addEventListener("click", async () => {
   if (!lbItem || !confirm(`Delete this ${lbItem.kind}? This can't be undone.`)) return;
-  try { await store.deleteMedia(lbItem); closeLightbox(); toast(`${lbItem ? lbItem.kind : "Item"} deleted`); await reload(selected); }
+  const kind = lbItem.kind;
+  try { await store.deleteMedia(lbItem); closeLightbox(); toast(`${kind === "video" ? "Video" : "Photo"} deleted`); await reload(selected); }
   catch (e) { toast("Couldn't delete it: " + e.message); }
 });
 
@@ -492,7 +327,7 @@ async function deletePlane(p) {
   catch (e) { toast("Couldn't delete it: " + e.message); }
 }
 
-/* ================= logbook ================= */
+/* ================= logbook + account ================= */
 let logAp = null;
 function renderList() {
   const q = ($("#q").value || "").trim().toLowerCase();
@@ -505,20 +340,22 @@ function renderList() {
     const th = thumbOf(p), n = spots(p), l = latest(p), st = status(p);
     const chip = st === "live" ? `<span class="chip live">Live</span>` : st === "last" ? `<span class="chip last">${agoShort(lastAgo(p))} ago</span>` : `<span class="chip none">No position</span>`;
     return `<button class="row" type="button" data-id="${p.id}">${th ? `<img src="${th}" alt="" loading="lazy">` : `<span class="noimg"></span>`}<div><div class="r1">${esc(p.reg)}${n > 1 ? `<em>×${n}</em>` : ""}</div><div class="r2">${esc(p.type_name || "Type not set")} · ${esc(p.airline || "Airline not set")}</div><div class="r2">Last spotted ${fmtDate(l.spotted_on)}, ${esc(apName(l.airport))}</div></div>${chip}</button>`;
-  }).join("") : PLANES.length ? `<p class="empty">No planes match “${esc(q)}”.</p>` : `<p class="empty">Nothing logged yet. Tap Add spot to log your first plane.</p>`;
+  }).join("") : PLANES.length ? `<p class="empty">No planes match “${esc(q)}”.</p>` : `<p class="empty">Nothing logged yet.${canAdd() ? " Tap Add spot to log your first plane." : ""}</p>`;
   $("#list").querySelectorAll(".row").forEach(r => r.addEventListener("click", () => select(r.dataset.id, true)));
-  const admin = me && me.role === "admin";
+  const roleLabel = { admin: " (admin)", spotter: "", viewer: " (view only)" }[me.role] || "";
   $("#acct").innerHTML = `
     ${store.mode === "demo" ? `<div class="banner">Demo mode: these are sample planes and nothing is saved.</div>` : ""}
-    <div class="who">Signed in as <b>${esc(me.name || me.email)}</b>${admin ? " (admin)" : ""}</div>
+    <div class="who">Signed in as <b>${esc(me.name || me.email)}</b>${roleLabel}</div>
     <div class="btnrow">
-      ${admin ? `<button class="btn flat" type="button" id="exportBtn">Download backup</button>` : ""}
+      ${isAdmin() ? `<button class="btn flat" type="button" id="exportBtn">Download backup</button>` : ""}
+      ${store.mode !== "demo" ? `<button class="btn flat" type="button" id="chPwBtn">Change password</button>` : ""}
       <button class="btn flat" type="button" id="signOutBtn">Sign out</button>
     </div>`;
   $("#signOutBtn").addEventListener("click", signOut);
   const ex = $("#exportBtn"); if (ex) ex.addEventListener("click", exportBackup);
+  const cp = $("#chPwBtn"); if (cp) cp.addEventListener("click", () => showAuth("newpw", { mode: "change" }));
 }
-function openLogbook(ap) { logAp = ap || null; selected = null; $("#q").value = ""; renderList(); openSheet("logbook"); dirty = true; }
+function openLogbook(ap) { logAp = ap || null; selected = null; $("#q").value = ""; renderList(); openSheet("logbook"); syncMap(); if (mapApi) mapApi.setPadding(mapPadding()); }
 $("#openLog").addEventListener("click", () => openLogbook());
 $("#q").addEventListener("input", renderList);
 function exportBackup() {
@@ -553,9 +390,9 @@ function renderStats() {
   const total = PLANES.reduce((a, p) => a + spots(p), 0);
   const B = badgeList(), earned = B.filter(b => b[2] >= b[3]).length;
   const badgesHTML = B.map(([n, d, v, max, ic]) => { const done = v >= max; return `<div class="bdg${done ? "" : " lock"}"><div class="md"><svg viewBox="0 0 24 24">${ic}</svg></div><b>${n}</b><span>${d}</span>${done ? "" : `<div class="prog" aria-label="${v} of ${max}"><i style="width:${Math.round(v / max * 100)}%"></i></div><span>${v} / ${max}</span>`}</div>`; }).join("");
-  const head = `<div class="sh-head"><div><h2>Hangar stats</h2><div class="sh-sub">Everything you've spotted so far</div></div><button class="icon-btn" data-close type="button" aria-label="Close">${CLOSE_SVG}</button></div>`;
+  const head = `<div class="sh-head"><div><h2>Hangar stats</h2><div class="sh-sub">Everything spotted so far</div></div><button class="icon-btn" data-close type="button" aria-label="Close">${CLOSE_SVG}</button></div>`;
   if (!total) {
-    $("#stats").innerHTML = head + `<div class="sh-body"><p class="empty">No spots yet. Your stats and badges start filling up as soon as you log your first plane.</p><section><h3 class="eyebrow">Badges to earn</h3><div class="badges">${badgesHTML}</div></section></div>`;
+    $("#stats").innerHTML = head + `<div class="sh-body"><p class="empty">No spots yet. Stats and badges start filling up as soon as the first plane is logged.</p><section><h3 class="eyebrow">Badges to earn</h3><div class="badges">${badgesHTML}</div></section></div>`;
     return;
   }
   const air = tally(p => p.airline), types = tally(p => p.type_name), aps = tally((p, s) => s.airport);
@@ -564,8 +401,8 @@ function renderStats() {
   const live = PLANES.filter(p => p.live && !p.live.onGround);
   const hi = live.filter(p => p.live.alt != null).sort((a, b) => b.live.alt - a.live.alt)[0];
   const fast = live.filter(p => p.live.gs != null).sort((a, b) => b.live.gs - a.live.gs)[0];
-  const far = PLANES.filter(p => posOf(p) && AIRPORTS[latest(p).airport]).map(p => ({ p, mi: d3.geoDistance(AIRPORTS[latest(p).airport].c, posOf(p)) * EARTH_MI })).sort((a, b) => b.mi - a.mi)[0];
-  const inAir = PLANES.filter(p => posOf(p) && hOf(p) > 0).length, onGround = PLANES.filter(p => posOf(p) && hOf(p) === 0).length;
+  const far = PLANES.filter(p => posOf(p) && getAirport(latest(p).airport)).map(p => ({ p, mi: d3.geoDistance(getAirport(latest(p).airport).c, posOf(p)) * EARTH_MI })).sort((a, b) => b.mi - a.mi)[0];
+  const inAir = PLANES.filter(p => posOf(p) && !onGround(p)).length, ground = PLANES.filter(p => posOf(p) && onGround(p)).length;
   const maxA = air.length ? air[0][1] : 1;
   const months = [], now = new Date();
   for (let i = 6; i >= 0; i--) { const d = new Date(now.getFullYear(), now.getMonth() - i, 1); months.push({ key: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`, label: d.toLocaleDateString("en-GB", { month: "short" }), v: 0 }); }
@@ -585,8 +422,8 @@ function renderStats() {
       <section><h3 class="eyebrow">Your planes right now</h3><div class="now">
         ${hi ? tile("Highest flyer", `<span class="v mono">${esc(hi.reg)}</span>`, `${num(hi.live.alt)} ft up`, "", hi.id) : tile("Highest flyer", `<span class="v">None flying</span>`, "Check back later")}
         ${fast ? tile("Fastest", `<span class="v mono">${esc(fast.reg)}</span>`, `${fast.live.gs} knots (${num(fast.live.gs * 1.15078)} mph)`, "", fast.id) : tile("Fastest", `<span class="v">None flying</span>`, "Check back later")}
-        ${far ? tile("Furthest from where you saw it", `<span class="v mono">${esc(far.p.reg)}</span>`, `${num(far.mi)} miles away`, "", far.p.id) : ""}
-        ${tile("In the air / on the ground", `<span class="v">${inAir} / ${onGround}</span>`, `${PLANES.filter(p => p.live).length} broadcasting live`)}
+        ${far ? tile("Furthest from where it was spotted", `<span class="v mono">${esc(far.p.reg)}</span>`, `${num(far.mi)} miles away`, "", far.p.id) : ""}
+        ${tile("In the air / on the ground", `<span class="v">${inAir} / ${ground}</span>`, `${PLANES.filter(p => p.live).length} broadcasting live`)}
       </div></section>
       ${air.length ? `<section><h3 class="eyebrow">Spots by airline</h3><div class="chart">${air.map(([n, v]) => `<div class="bar-row" title="${esc(n)}: ${v} spots"><span class="nm">${tailSVG(airPlane(n))}${esc(n)}</span><span class="trk"><span class="fill" style="width:${v / maxA * 100}%"></span></span><span class="val">${v}</span></div>`).join("")}</div></section>` : ""}
       <section><h3 class="eyebrow">Spots by month</h3><div class="cols">${months.map(m => `<div class="col" title="${m.label}: ${m.v} spots"><span class="cv${m.v ? "" : " z"}">${m.v}</span><span class="c" style="height:${m.v / maxM * 80}%"></span></div>`).join("")}</div><div class="collbl">${months.map(m => `<span>${m.label}</span>`).join("")}</div></section>
@@ -594,18 +431,132 @@ function renderStats() {
     </div>`;
   $("#stats").querySelectorAll("[data-sel]").forEach(b => b.addEventListener("click", () => select(b.dataset.sel, true)));
 }
-$("#openStats").addEventListener("click", () => { selected = null; renderStats(); openSheet("stats"); dirty = true; });
+$("#openStats").addEventListener("click", () => { selected = null; renderStats(); openSheet("stats"); syncMap(); if (mapApi) mapApi.setPadding(mapPadding()); });
 
-/* ================= filters, controls ================= */
-document.querySelectorAll(".seg [data-f]").forEach(b => b.addEventListener("click", () => {
-  filter = b.dataset.f; document.querySelectorAll(".seg [data-f]").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
-  const s = PLANES.find(p => p.id === selected); if (s && !visible(s)) closeSheets(); dirty = true;
-}));
-$("#pinToggle").addEventListener("click", e => { showPins = !showPins; e.currentTarget.setAttribute("aria-pressed", String(showPins)); dirty = true; });
-$("#zin").addEventListener("click", () => animateTo({ ...V, R: clampR(V.R * 1.8) }, 300));
-$("#zout").addEventListener("click", () => animateTo({ ...V, R: clampR(V.R / 1.8) }, 300));
-$("#zfit").addEventListener("click", () => { hideFact(); closeSheets(true); flyHome(); });
-$("#spin").addEventListener("click", e => { spin = !spin; e.currentTarget.setAttribute("aria-pressed", String(spin)); if (spin) { closeSheets(true); hideFact(); } });
+/* ================= airport panel ================= */
+let apOpen = null, apTimer = null, apLive = null, apHl = null;
+const COVER = { SKC: "Clear sky", CLR: "Clear sky", NSC: "No significant cloud", NCD: "No cloud", CAVOK: "Clear and great visibility", FEW: "A few clouds", SCT: "Scattered clouds", BKN: "Mostly cloudy", OVC: "Overcast", OVX: "Sky hidden" };
+const WX = [[/TS/, "Thunderstorms"], [/SN/, "Snow"], [/FZ/, "Freezing"], [/\+RA|RA/, "Rain"], [/DZ/, "Drizzle"], [/SH/, "Showers"], [/FG/, "Fog"], [/BR/, "Mist"], [/HZ/, "Haze"]];
+const compass = d => ["north", "north-east", "east", "south-east", "south", "south-west", "west", "north-west"][Math.round(((d % 360) + 360) % 360 / 45) % 8];
+function skyText(m) {
+  if (m.wx) { const hit = WX.find(([re]) => re.test(m.wx)); if (hit) return hit[1]; }
+  if (m.cover && COVER[m.cover]) return COVER[m.cover];
+  const order = ["OVC", "BKN", "SCT", "FEW"]; const c = (m.clouds || []).map(c => c.cover).sort((a, b) => order.indexOf(a) - order.indexOf(b))[0];
+  return c && COVER[c] ? COVER[c] : (m.cat === "VFR" ? "Clear" : "");
+}
+function runwayInUse(ap, m) {
+  if (!ap.r || !ap.r.length || !m) return null;
+  if (typeof m.wdir !== "number" || (m.wspd || 0) < 3) return { calm: true };
+  let best = null;
+  ap.r.forEach(([le, h1, he, h2, L]) => [[le, h1], [he, h2]].forEach(([id, h]) => {
+    const diff = Math.abs(((h - m.wdir) + 540) % 360 - 180);
+    if (!best || diff < best.diff - 5 || (Math.abs(diff - best.diff) <= 5 && L > best.L)) best = { id, h, diff, L };
+  }));
+  return best;
+}
+function runwaySVG(ap, m, best) {
+  const R = 46, c = 60, rw = ap.r[0] ? ap.r : [];
+  const pt = (deg, r) => [c + r * Math.sin(deg * Math.PI / 180), c - r * Math.cos(deg * Math.PI / 180)];
+  const lines = rw.slice(0, 3).map(([le, h1, he, h2], i) => {
+    const off = (i - (Math.min(rw.length, 3) - 1) / 2) * 9, perp = h1 + 90;
+    const o = pt(perp, off).map(v => v - c);
+    const [x1, y1] = pt(h1 + 180, R - 8), [x2, y2] = pt(h1, R - 8);
+    const [lx1, ly1] = pt(h1 + 180, R + 6), [lx2, ly2] = pt(h1, R + 6);
+    const hlA = best && best.id === le, hlB = best && best.id === he;
+    return `<line x1="${x1 + o[0]}" y1="${y1 + o[1]}" x2="${x2 + o[0]}" y2="${y2 + o[1]}" stroke="var(--ink)" stroke-width="7" stroke-linecap="butt"/>
+      <line x1="${x1 + o[0]}" y1="${y1 + o[1]}" x2="${x2 + o[0]}" y2="${y2 + o[1]}" stroke="var(--panel)" stroke-width="1" stroke-dasharray="3 3"/>
+      <text x="${lx1 + o[0]}" y="${ly1 + o[1]}" class="rwl${hlA ? " on" : ""}">${esc(le)}</text><text x="${lx2 + o[0]}" y="${ly2 + o[1]}" class="rwl${hlB ? " on" : ""}">${esc(he)}</text>`;
+  }).join("");
+  let wind = "";
+  if (m && typeof m.wdir === "number" && (m.wspd || 0) >= 3) {
+    const [sx, sy] = pt(m.wdir, R + 2), [ex, ey] = pt(m.wdir, 14);
+    wind = `<line x1="${sx}" y1="${sy}" x2="${ex}" y2="${ey}" stroke="var(--route)" stroke-width="3" stroke-linecap="round" marker-end="url(#ah)"/>`;
+  }
+  return `<svg class="rwsvg" viewBox="-8 -8 136 136" role="img" aria-label="Runway and wind diagram"><defs><marker id="ah" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="4" markerHeight="4" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--route)"/></marker></defs>
+    <circle cx="60" cy="60" r="${R + 14}" fill="var(--panel-2)" stroke="var(--line)"/><text x="60" y="-1" class="rwn">N</text>${lines}${wind}</svg>`;
+}
+function phaseLabel(t) {
+  if (t.phase === "landing") return "Coming in to land";
+  if (t.phase === "departing") return "Just taken off";
+  if (t.phase === "ground") return "On the ground";
+  return "Flying nearby";
+}
+function renderAirport() {
+  const ap = apOpen; if (!ap) return;
+  const code = ap.a || ap.i, short = ap.n.replace(/ (International )?Airport$/i, "");
+  const myCount = PLANES.reduce((a, p) => a + p.sightings.filter(s => s.airport === code || s.airport === ap.i).length, 0);
+  const L = apLive, m = L && L.metar;
+  let wx = `<section class="status none"><p class="expl">${L === null ? "Loading the latest weather…" : "No weather report for this airport right now."}</p></section>`;
+  if (m) {
+    const best = runwayInUse(ap, m);
+    const windTxt = typeof m.wdir === "number" && (m.wspd || 0) >= 1 ? `From the ${compass(m.wdir)} (${m.wdir}°) at ${m.wspd} kt${m.wgst ? `, gusting ${m.wgst}` : ""}` : m.wdir === "VRB" ? `Light and changing direction, ${m.wspd || 0} kt` : "Calm";
+    const vis = m.visib ? (/\+/.test(m.visib) || parseFloat(m.visib) >= 6 ? "10 km or more" : `${Math.round(parseFloat(m.visib) * 1.609)} km`) : "–";
+    const mins = m.time ? (Date.now() - Date.parse(m.time)) / 60000 : null;
+    wx = `<section class="wxcard">
+      <div class="st-top"><span class="pill ${m.cat === "VFR" ? "live" : "last"}">${m.cat === "VFR" ? "Good flying weather" : m.cat ? "Low cloud or poor visibility" : "Weather"}</span>${mins != null ? `<span class="upd">Reported ${fmtAgo(mins)}</span>` : ""}</div>
+      <div class="wxmain"><b>${m.temp != null ? Math.round(m.temp) + "°C" : ""}</b><span>${esc(skyText(m))}</span></div>
+      <dl class="kv two"><div><dt>Wind</dt><dd class="small">${esc(windTxt)}</dd></div><div><dt>Visibility</dt><dd class="small">${vis}</dd></div></dl>
+      ${ap.r && ap.r.length ? `<div class="rwrow">${runwaySVG(ap, m, best && !best.calm ? best : null)}<p>${best && best.calm ? "The wind is calm, so planes could be using any runway." : best ? `Planes are probably using <b>runway ${esc(best.id)}</b>. They take off and land into the wind, because it helps them lift off and slow down.` : ""}</p></div>` : ""}
+      ${m.raw ? `<details class="raw"><summary>What the pilots read</summary><code>${esc(m.raw)}</code></details>` : ""}
+    </section>`;
+  }
+  let traffic = "";
+  if (L && L.traffic) {
+    const groups = ["landing", "departing", "nearby", "ground"].map(ph => [ph, L.traffic.filter(t => t.phase === ph)]).filter(g => g[1].length);
+    traffic = groups.length ? groups.map(([ph, list]) => `<h4 class="tgh">${phaseLabel({ phase: ph })} · ${list.length}</h4>` + list.slice(0, ph === "ground" ? 12 : 10).map(t => {
+      const mine = t.reg && PLANES.find(p => p.reg === t.reg);
+      const routeTxt = t.route ? (ph === "landing" && t.route.fromName ? `from ${t.route.fromName}` : t.route.toName ? `to ${t.route.toName}` : "") : "";
+      const al = t.callsign && AIRLINES[t.callsign.slice(0, 3)] ? AIRLINES[t.callsign.slice(0, 3)].name : "";
+      const ty = typeInfo(t.type);
+      const bits = [ty ? ty.name : t.type, al].filter(Boolean).join(" · ");
+      const miles = Math.round(t.dist * 1.15078 * 10) / 10;
+      const nums = ph === "ground" ? "" : `${num(t.alt)} ft · ${miles < 1 ? "under a mile" : miles + " miles"} away`;
+      return `<div class="trow${apHl === t.key ? " hl" : ""}" data-key="${esc(t.key)}"><button class="tmain" type="button" data-fly="${esc(t.key)}"><svg class="tg ${ph}" viewBox="0 0 24 24" style="rotate:${t.track || 0}deg"><path d="${PLANE_D}"/></svg><div><div class="r1">${esc(t.reg || t.callsign || "Unknown")}${mine ? `<em class="minechip">In the logbook</em>` : ""}</div><div class="r2">${esc(bits || "Type unknown")}${routeTxt ? " · " + esc(routeTxt) : ""}</div>${nums ? `<div class="r2">${nums}</div>` : ""}</div></button>${t.reg && canAdd() ? `<button class="btn flat logit" type="button" data-log="${esc(t.reg)}">Log it</button>` : ""}</div>`;
+    }).join("")).join("") : `<p class="empty">No planes around the airport right now.</p>`;
+    if (L.overhead) traffic += `<p class="hint">Plus ${L.overhead} more flying high overhead.</p>`;
+  } else if (L && L.traffic === null) traffic = `<p class="empty">Live planes aren't available right now. Try again in a minute.</p>`;
+  else traffic = `<p class="empty">Looking for planes…</p>`;
+  const body = $("#airport .sh-body"), st = body ? body.scrollTop : 0;
+  $("#airport").innerHTML = `
+    <div class="sh-head"><div><div class="reg">${esc(code)}</div><div class="sh-sub">${esc(short)}${ap.m ? " · " + esc(ap.m) : ""} · ${esc(ap.i)}</div></div>
+      <button class="icon-btn" data-close type="button" aria-label="Close">${CLOSE_SVG}</button></div>
+    <div class="sh-body">
+      ${wx}
+      ${myCount ? `<button class="btn flat" type="button" id="apMine">${myCount} ${myCount === 1 ? "spot" : "spots"} here in the logbook</button>` : ""}
+      <section><h3 class="eyebrow">Around the airport now <span class="upd" data-upd></span></h3>${traffic}</section>
+      <p class="credit">Weather from aviationweather.gov. Planes from adsb.lol. Runway guess based on the wind.</p>
+    </div>`;
+  const nb = $("#airport .sh-body"); if (nb) nb.scrollTop = st;
+  const mineBtn = $("#apMine"); if (mineBtn) mineBtn.addEventListener("click", () => openLogbook(PLANES.some(p => p.sightings.some(s => s.airport === code)) ? code : ap.i));
+  $("#airport").querySelectorAll("[data-log]").forEach(b => b.addEventListener("click", () => openAdd({ reg: b.dataset.log, airport: code })));
+  $("#airport").querySelectorAll("[data-fly]").forEach(b => b.addEventListener("click", () => highlightTraffic(b.dataset.fly, false)));
+  updClock();
+}
+function highlightTraffic(key, scroll) {
+  apHl = key;
+  if (mapApi) mapApi.highlightTraffic(key);
+  document.querySelectorAll("#airport .trow").forEach(r => r.classList.toggle("hl", r.dataset.key === key));
+  const row = document.querySelector(`#airport .trow[data-key="${CSS.escape(key)}"]`);
+  if (scroll && row) row.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  const t = apLive && apLive.traffic && apLive.traffic.find(t => t.key === key);
+  if (!scroll && t && mapApi) mapApi.flyTo([t.lon, t.lat], Math.max(mapApi.map.getZoom(), 11), mapPadding());
+}
+async function loadAirportLive() {
+  const ap = apOpen; if (!ap) return;
+  try { const res = await store.airportLive(ap); if (apOpen !== ap) return; apLive = res; feedState.at = Date.now(); }
+  catch (e) { if (apOpen !== ap) return; apLive = { metar: apLive && apLive.metar, traffic: null, overhead: 0 }; }
+  renderAirport();
+  if (mapApi) mapApi.setTraffic((apLive.traffic || []).map(t => ({ key: t.key, ll: [t.lon, t.lat], track: t.track, label: t.reg || t.callsign || "", phase: t.phase, mine: !!(t.reg && PLANES.find(p => p.reg === t.reg)) })));
+}
+function openAirport(ap) {
+  if (!ap) return;
+  selected = null; apOpen = ap; apLive = null; apHl = null;
+  renderAirport(); openSheet("airport"); syncMap();
+  flyTo([ap.x, ap.y], 10.6);
+  loadAirportLive();
+  clearInterval(apTimer); apTimer = setInterval(() => { if (document.visibilityState === "visible") loadAirportLive(); }, 15000);
+}
+function stopAirport() { if (!apOpen) return; apOpen = null; apLive = null; clearInterval(apTimer); if (mapApi) mapApi.setTraffic([]); }
 
 /* ================= add a spot ================= */
 const apSel = $("#apIn");
@@ -618,17 +569,31 @@ const apSel = $("#apIn");
     apSel.appendChild(og);
   });
 })();
+function ensureAirportOption(code) {
+  if (!code || [...apSel.options].some(o => o.value === code)) return;
+  const a = getAirport(code); if (!a) return;
+  let og = apSel.querySelector('optgroup[data-extra]');
+  if (!og) { og = document.createElement("optgroup"); og.label = "Other airports"; og.dataset.extra = "1"; apSel.prepend(og); }
+  const o = document.createElement("option"); o.value = code; o.textContent = `${a.n} (${code})`; og.appendChild(o);
+}
 let pending = [], found = null, lookupSeq = 0, exifUsed = false;
 function resetAdd() {
   $("#regIn").value = ""; $("#noteIn").value = ""; $("#lookupOut").innerHTML = ""; $("#addErr").hidden = true; $("#planeFields").hidden = true;
   $("#tyIn").value = ""; $("#alIn").value = ""; $("#exifHint").hidden = true; exifUsed = false;
   pending = []; renderPrev(); found = null;
   $("#dateIn").value = todayISO(); $("#dateIn").max = todayISO();
-  apSel.value = lsGet("spotters.lastAirport") || "LBA";
+  const last = lsGet("spotters.lastAirport") || "LBA"; ensureAirportOption(last); apSel.value = last;
   const sb = $("#saveBtn"); sb.disabled = false; sb.textContent = "Save to logbook";
 }
-function openAdd() { resetAdd(); selected = null; openSheet("add"); dirty = true; setTimeout(() => $("#regIn").focus(), 350); }
-$("#openAdd").addEventListener("click", openAdd);
+function openAdd(prefill) {
+  if (!canAdd()) return;
+  resetAdd(); selected = null; openSheet("add"); syncMap(); if (mapApi) mapApi.setPadding(mapPadding());
+  if (prefill && prefill.airport) { ensureAirportOption(prefill.airport); apSel.value = prefill.airport; }
+  if (prefill && prefill.reg) { $("#regIn").value = prefill.reg; doLookup(); }
+  else setTimeout(() => $("#regIn").focus(), 350);
+}
+$("#openAdd").addEventListener("click", () => openAdd());
+$("#welcomeAdd").addEventListener("click", () => openAdd());
 const tick = `<svg width="22" height="22" viewBox="0 0 24 24" style="flex:none"><path d="${PLANE_D}" fill="var(--live)" stroke="var(--live-ink)" stroke-width="1.1"/></svg>`;
 function cleanOwner(s) {
   if (!s) return "";
@@ -678,7 +643,6 @@ async function doLookup() {
 $("#lookupBtn").addEventListener("click", doLookup);
 $("#regIn").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); doLookup(); } });
 $("#regIn").addEventListener("input", () => { if (found && found.reg !== $("#regIn").value.trim().toUpperCase()) { found = null; $("#lookupOut").innerHTML = ""; $("#planeFields").hidden = true; } });
-
 $("#mediaIn").addEventListener("change", async e => {
   const files = [...e.target.files]; e.target.value = "";
   $("#addErr").hidden = true;
@@ -689,7 +653,7 @@ $("#mediaIn").addEventListener("change", async e => {
       const ex = await readExif(f);
       const bits = [];
       if (ex.date && ex.date <= todayISO()) { $("#dateIn").value = ex.date; bits.push("date"); }
-      if (ex.lat != null) { const a = nearestAirport([ex.lon, ex.lat], 25); if (a) { apSel.value = a.code; bits.push("airport"); } }
+      if (ex.lat != null) { const a = nearestAirport([ex.lon, ex.lat], 25); if (a) { ensureAirportOption(a.code); apSel.value = a.code; bits.push("airport"); } }
       if (bits.length) { exifUsed = true; const h = $("#exifHint"); h.textContent = `Set the ${bits.join(" and ")} from your photo.`; h.hidden = false; }
     }
     try {
@@ -757,11 +721,7 @@ async function refreshPositions() {
     for (const p of PLANES) {
       const L = res.planes[p.reg];
       const isLive = L && L.seenPos != null && L.seenPos <= LIVE_MAX_AGE_S;
-      if (!isLive) {
-        // keep the old live data briefly if the feed failed, otherwise fall back to last seen
-        if (!(res.errors && p.live && now - (p.liveAt || 0) < 120000)) p.live = null;
-        continue;
-      }
+      if (!isLive) { if (!(res.errors && p.live && now - (p.liveAt || 0) < 120000)) p.live = null; continue; }
       p.live = L; p.liveAt = now;
       const moved = !p.last || d3.geoDistance([p.last.lon, p.last.lat], [L.lon, L.lat]) * EARTH_KM > 10 || p.last.onGround !== !!L.onGround;
       if (moved || now - p.last.at > 10 * 60000) {
@@ -773,7 +733,7 @@ async function refreshPositions() {
     feedState = { ok: false, at: Date.now() };
   } finally {
     posBusy = false;
-    refreshMarkerLabels(); updBrand(); dirty = true;
+    syncMap(); updBrand();
     const s = PLANES.find(p => p.id === selected);
     if (s && $("#detail").classList.contains("open")) { const sb = $("#detail .sh-body"), st = sb ? sb.scrollTop : 0; renderDetail(s); const nb = $("#detail .sh-body"); if (nb) nb.scrollTop = st; }
   }
@@ -797,7 +757,7 @@ function updClock() {
   document.querySelectorAll("[data-upd]").forEach(x => x.textContent = !feedState.at ? "" : s < 5 ? "Updated just now" : `Updated ${s}s ago`);
 }
 setInterval(updClock, 1000);
-setInterval(() => { sun = sunPos(new Date()); refreshMarkerLabels(); dirty = true; }, 60000);
+setInterval(() => syncMap(), 60000);
 
 /* ================= data loading ================= */
 async function reload(selectId) {
@@ -805,19 +765,41 @@ async function reload(selectId) {
   PLANES = await store.loadAll();
   PLANES.forEach(p => { if (prevLive[p.reg]) Object.assign(p, prevLive[p.reg]); });
   dataLoadedAt = Date.now();
-  buildMarkers(); updBrand(); updWelcome();
+  syncMap(); updBrand(); updWelcome();
   if (selectId && PLANES.find(p => p.id === selectId) && $("#detail").classList.contains("open")) renderDetail(PLANES.find(p => p.id === selectId));
   if ($("#logbook").classList.contains("open")) renderList();
   if ($("#stats").classList.contains("open")) renderStats();
 }
 
-/* ================= sign in / out ================= */
-function showLogin(msg) {
+/* ================= sign in, reset, new password ================= */
+let newPwMode = "reset";
+function showAuth(view, opt = {}) {
   $("#login").hidden = false; $("#boot").hidden = true;
-  $("#demoNote").hidden = store.mode !== "demo";
-  const le = $("#loginErr"); le.hidden = !msg; le.textContent = msg || "";
-  setTimeout(() => $("#em").focus(), 100);
+  ["loginForm", "forgotForm", "newPwForm"].forEach(id => { $("#" + id).hidden = true; });
+  if (view === "login") {
+    $("#loginForm").hidden = false;
+    $("#demoNote").hidden = store.mode !== "demo";
+    $("#toForgot").hidden = store.mode === "demo";
+    const le = $("#loginErr"); le.hidden = !opt.msg; le.textContent = opt.msg || "";
+    setTimeout(() => $("#em").focus(), 100);
+  } else if (view === "forgot") {
+    $("#forgotForm").hidden = false; $("#forgotOk").hidden = true; $("#forgotErr").hidden = !opt.msg; $("#forgotErr").textContent = opt.msg || "";
+    $("#fem").value = $("#em").value; $("#forgotBtn").disabled = false; $("#forgotBtn").textContent = "Send me a link";
+    setTimeout(() => $("#fem").focus(), 100);
+  } else if (view === "newpw") {
+    newPwMode = opt.mode || "reset";
+    $("#newPwForm").hidden = false; $("#newPwErr").hidden = true; $("#np1").value = ""; $("#np2").value = "";
+    $("#newPwTitle").textContent = newPwMode === "invite" ? "Welcome! Choose a password" : newPwMode === "change" ? "Change your password" : "Choose a new password";
+    $("#newPwIntro").textContent = newPwMode === "invite" ? "You've been invited to the Spotter's Logbook. Pick a password to sign in with from now on. It needs at least 8 characters." : "Pick something you'll remember. It needs at least 8 characters.";
+    $("#newPwCancel").hidden = newPwMode !== "change";
+    $("#npUser").value = (me && me.email) || "";
+    setTimeout(() => $("#np1").focus(), 100);
+  }
 }
+function hideAuth() { $("#login").hidden = true; }
+$("#toForgot").addEventListener("click", () => showAuth("forgot"));
+$("#backToLogin").addEventListener("click", () => showAuth("login"));
+$("#newPwCancel").addEventListener("click", hideAuth);
 $("#loginForm").addEventListener("submit", async e => {
   e.preventDefault();
   const btn = $("#loginBtn"), le = $("#loginErr");
@@ -830,39 +812,92 @@ $("#loginForm").addEventListener("submit", async e => {
     me = user; $("#pw").value = "";
     await startApp();
   } catch (ex) {
-    le.textContent = /invalid login/i.test(ex.message) ? "That email and password don't match. Check them and try again." : ex.message; le.hidden = false;
+    const msg = ex.message || "";
+    le.textContent = /invalid login/i.test(msg) ? "That email and password don't match. Check them, or tap \"Forgotten your password?\" below."
+      : /not confirmed/i.test(msg) ? "This account hasn't been confirmed yet. Ask Dad to confirm it in Supabase."
+      : /rate|too many/i.test(msg) ? "Too many tries. Wait a minute and try again." : msg;
+    le.hidden = false;
   } finally { btn.disabled = false; btn.textContent = "Sign in"; }
 });
+$("#forgotForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  const email = $("#fem").value.trim(), btn = $("#forgotBtn"), er = $("#forgotErr");
+  er.hidden = true;
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { er.textContent = "Type the email address you sign in with."; er.hidden = false; return; }
+  btn.disabled = true; btn.textContent = "Sending…";
+  try {
+    await store.resetPassword(email);
+    const ok = $("#forgotOk"); ok.textContent = `If ${email} has an account, an email with a reset link is on its way. Open the link on this iPad or phone. It works for one hour.`; ok.hidden = false;
+    btn.textContent = "Sent";
+  } catch (ex) {
+    const msg = ex.message || "";
+    er.textContent = /rate|seconds|limit/i.test(msg) ? "A link was sent very recently. Wait a few minutes before asking for another one."
+      : /not authorized|smtp|send/i.test(msg) ? "The email couldn't be sent. Ask Dad to check the email settings in Supabase." : msg;
+    er.hidden = false; btn.disabled = false; btn.textContent = "Send me a link";
+  }
+});
+$("#newPwForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  const a = $("#np1").value, b = $("#np2").value, er = $("#newPwErr"), btn = $("#newPwBtn");
+  er.hidden = true;
+  if (a.length < 8) { er.textContent = "Use at least 8 characters."; er.hidden = false; return; }
+  if (a !== b) { er.textContent = "The two passwords don't match. Type them again."; er.hidden = false; return; }
+  btn.disabled = true; btn.textContent = "Saving…";
+  try {
+    await store.setPassword(a);
+    toast(newPwMode === "change" ? "Password changed" : "Password saved. You're signed in!");
+    hideAuth();
+    if (!me) { const u = await store.currentUser(); if (u && u.role) { me = u; await startApp(); } else showAuth("login", { msg: "Password saved. Sign in with it now." }); }
+  } catch (ex) {
+    const msg = ex.message || "";
+    er.textContent = /different from the old/i.test(msg) ? "That's your old password. Pick a new one." : /session|expired|jwt/i.test(msg) ? "The reset link has expired. Go back and ask for a new one." : msg;
+    er.hidden = false;
+  } finally { btn.disabled = false; btn.textContent = "Save password"; }
+});
 async function signOut() {
-  clearInterval(posTimer);
+  clearInterval(posTimer); stopAirport();
   await store.signOut();
-  me = null; PLANES = []; closeSheets(true); buildMarkers(); updBrand(); showLogin();
+  me = null; PLANES = []; closeSheets(true); syncMap(); updBrand(); applyRole(); showAuth("login");
 }
+function applyRole() { document.body.classList.toggle("viewer", !!me && !canAdd()); updWelcome(); }
 async function startApp() {
-  $("#login").hidden = true; $("#boot").hidden = true;
+  hideAuth(); $("#boot").hidden = true; applyRole();
   try { await reload(null); }
-  catch (e) { toast("Couldn't load your logbook: " + e.message, 6000); }
+  catch (e) { toast("Couldn't load the logbook: " + e.message, 6000); }
   refreshPositions(); startPositionLoop();
 }
 
 /* ================= boot ================= */
+function drawSpace() {
+  const c = $("#bg"), dpr = Math.min(2, devicePixelRatio || 1), w = c.clientWidth, h = c.clientHeight;
+  c.width = w * dpr; c.height = h * dpr; const x = c.getContext("2d"); x.scale(dpr, dpr);
+  const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const g = x.createLinearGradient(0, 0, 0, h); g.addColorStop(0, css("--space-a")); g.addColorStop(1, css("--space-b")); x.fillStyle = g; x.fillRect(0, 0, w, h);
+  if (css("--stars") === "1") { let s = 7; const r = () => (s = (s * 16807) % 2147483647) / 2147483647; for (let i = 0; i < w * h / 2600; i++) { x.globalAlpha = .25 + r() * .7; x.fillStyle = r() < .15 ? "#FFE9B8" : "#fff"; x.beginPath(); x.arc(r() * w, r() * h, r() < .92 ? r() * .9 + .2 : r() * 1.3 + .8, 0, 7); x.fill(); } }
+}
 async function boot() {
-  const themeChange = () => { drawBg(); dirty = true; };
-  if (window.matchMedia) { const mq = matchMedia("(prefers-color-scheme: dark)"); mq.addEventListener && mq.addEventListener("change", themeChange); }
-  let rT; new ResizeObserver(() => { clearTimeout(rT); rT = setTimeout(() => { sizeAll(); markers.querySelectorAll("*").forEach(e => e._w = 0); }, 100); }).observe(stage);
+  drawSpace(); addEventListener("resize", () => { drawSpace(); if (mapApi) mapApi.resize(); });
+  if (window.matchMedia) { const mq = matchMedia("(prefers-color-scheme: dark)"); mq.addEventListener && mq.addEventListener("change", drawSpace); }
   if (innerWidth < 640) $("#legend").open = false;
-  sizeAll(); V.R = R0; Object.assign(V, home());
-  buildMarkers(); updBrand();
-  requestAnimationFrame(frame);
-  loadWorld().then(() => { dirty = true; }).catch(() => toast("Couldn't load the map shapes. Check your connection."));
+  updBrand();
+  loadCountries();
+  const apReady = loadAirports();
   try { store = await createStore(window.SPOTTERS_CONFIG || {}); }
   catch (e) { $("#boot").textContent = "Couldn't connect. Check your internet and refresh."; return; }
-  store.onSignedOut(() => { if (me) { me = null; PLANES = []; buildMarkers(); showLogin("You've been signed out."); } });
+  apReady.then(() => initMap());
+  store.onSignedOut(() => { if (me) { me = null; PLANES = []; syncMap(); applyRole(); showAuth("login", { msg: "You've been signed out." }); } });
+  if (store.authLink.error) { showAuth("forgot", { msg: store.authLink.error }); return; }
   try {
     const user = await store.currentUser();
-    if (user && user.role) { me = user; await startApp(); return; }
-    if (user && !user.role) await store.signOut();
+    if (user && user.role) {
+      me = user;
+      if (store.authLink.intent) { await startApp(); showAuth("newpw", { mode: store.authLink.intent }); return; }
+      await startApp(); return;
+    }
+    if (user && !user.role) { await store.signOut(); showAuth("login", { msg: "This account hasn't been given access yet. Ask Dad to add it." }); return; }
   } catch (e) { /* fall through to login */ }
-  showLogin();
+  showAuth("login");
 }
 boot();
+// Handy for testing from the browser console.
+window.spotters = { openAirport: code => openAirport(AP_BY[code]), openAdd };

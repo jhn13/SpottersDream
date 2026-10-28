@@ -16,6 +16,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Semi+Condensed:wght@600;700&family=IBM+Plex+Mono:wght@500;600&display=swap">
+<link rel="stylesheet" href="/vendor/maplibre-gl.css">
 <link rel="stylesheet" href="/css/app.css">
 </head>
 <body>
@@ -23,8 +24,7 @@
 <div id="app">
   <div id="stage">
     <canvas id="bg"></canvas>
-    <canvas id="globe" aria-label="Spinning globe showing the planes he has spotted" role="img"></canvas>
-    <div id="markers"></div>
+    <div id="map" role="application" aria-label="Map of spotted planes and airports"></div>
   </div>
 
   <div class="chrome top">
@@ -53,22 +53,22 @@
       <summary>Map key</summary>
       <div class="lg"><svg viewBox="-12 -12 24 24"><circle r="11" fill="var(--live)" opacity=".4"/><path transform="translate(-12,-12)" d="M12 1.6c.8 0 1.35.95 1.35 2.1v5.3l7.9 4.7v2l-7.9-2.45v5l2.25 1.65v1.55L12 20.5l-3.6.95v-1.55l2.25-1.65v-5L2.75 15.7v-2l7.9-4.7V3.7c0-1.15.55-2.1 1.35-2.1z" fill="var(--live)" stroke="var(--live-ink)" stroke-width="1.1"/></svg>Live, broadcasting right now</div>
       <div class="lg"><svg viewBox="-12 -12 24 24"><circle r="11" fill="none" stroke="var(--stale)" stroke-dasharray="2.5 2.5" stroke-width="1.3"/><path transform="translate(-12,-12)" d="M12 1.6c.8 0 1.35.95 1.35 2.1v5.3l7.9 4.7v2l-7.9-2.45v5l2.25 1.65v1.55L12 20.5l-3.6.95v-1.55l2.25-1.65v-5L2.75 15.7v-2l7.9-4.7V3.7c0-1.15.55-2.1 1.35-2.1z" fill="var(--panel)" stroke="var(--stale)" stroke-width="1.3" stroke-dasharray="2 1.6"/></svg>Last seen, not broadcasting</div>
-      <div class="lg"><svg viewBox="0 0 24 24"><path d="M2 20 Q12 2 22 14" fill="none" stroke="var(--route)" stroke-width="2.4" stroke-linecap="round"/><path d="M2 20 Q12 15 22 14" fill="none" stroke="var(--muted)" stroke-width="1.2" stroke-dasharray="2 2"/></svg>Flight path, with its shadow on the ground</div>
-      <div class="lg"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="#FFF8E6" stroke="var(--line)"/><path d="M12 5v2M11 7h2l1.2 5h-4.4zM9.5 12h5l2 7h-2.5l-2-3.5-2 3.5H7.5z" fill="none" stroke="#7A4B12" stroke-width="1.4" stroke-linejoin="round"/></svg>Landmark: tap for a fact</div>
+      <div class="lg"><svg viewBox="0 0 24 24"><path d="M2 18 Q8 6 14 9" fill="none" stroke="var(--route)" stroke-width="2.6" stroke-linecap="round"/><path d="M14 9 Q19 11 22 6" fill="none" stroke="var(--route)" stroke-width="2" stroke-dasharray="1 3" stroke-linecap="round"/></svg>Route: flown so far, then still to go</div>
+      <div class="lg"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="6" fill="#1F6FD1" stroke="#fff" stroke-width="2"/></svg>Airport: tap for live weather and planes</div>
     </details>
   </div>
 
   <div class="chrome br">
     <button class="zbtn" id="zin" type="button" aria-label="Zoom in"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
     <button class="zbtn" id="zout" type="button" aria-label="Zoom out"><svg viewBox="0 0 24 24"><path d="M5 12h14"/></svg></button>
+    <button class="zbtn" id="styleBtn" type="button" aria-label="Switch to satellite view"><svg viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/></svg></button>
     <button class="zbtn" id="spin" type="button" aria-label="Spin the globe" aria-pressed="true"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.6-5.9"/><path d="M20 4v5h-5"/></svg></button>
     <button class="zbtn" id="zfit" type="button" aria-label="Back to all planes"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
   </div>
 
-  <div id="fact" hidden role="dialog" aria-label="Landmark fact"></div>
   <div class="welcome" id="welcome" hidden>
-    <h3>Your globe is waiting</h3>
-    <p>Log your first plane and it'll appear here, wherever it is in the world.</p>
+    <h3 id="welcomeTitle">Your globe is waiting</h3>
+    <p id="welcomeText">Log your first plane and it'll appear here, wherever it is in the world.</p>
     <button class="btn primary" type="button" id="welcomeAdd">Add your first spot</button>
   </div>
 
@@ -84,6 +84,8 @@
   </aside>
 
   <aside class="sheet" id="stats" aria-label="Stats"></aside>
+
+  <aside class="sheet" id="airport" aria-label="Airport"></aside>
 
   <aside class="sheet" id="add" aria-label="Add a spot">
     <div class="sh-head"><div><h2>Add a spot</h2><div class="sh-sub">Log a plane you've seen</div></div><button class="icon-btn" data-close type="button" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
@@ -124,7 +126,29 @@
       <div class="field"><label for="pw">Password</label><input class="in" id="pw" type="password" autocomplete="current-password" placeholder="••••••••"></div>
       <p class="err" id="loginErr" hidden></p>
       <button class="btn primary wide" type="submit" id="loginBtn">Sign in</button>
+      <button class="linkbtn" type="button" id="toForgot">Forgotten your password?</button>
       <div class="proto" id="demoNote" hidden>Demo mode: the database isn't connected yet, so this shows sample planes and nothing is saved. Any email and password will work.</div>
+    </form>
+
+    <form class="lcard" id="forgotForm" novalidate hidden>
+      <h2>Reset your password</h2>
+      <p>Type your email and we'll send you a link to choose a new password.</p>
+      <div class="field"><label for="fem">Email</label><input class="in" id="fem" type="email" autocomplete="username" autocapitalize="none" placeholder="you@example.com"></div>
+      <p class="err" id="forgotErr" hidden></p>
+      <p class="okmsg" id="forgotOk" hidden></p>
+      <button class="btn primary wide" type="submit" id="forgotBtn">Send me a link</button>
+      <button class="linkbtn" type="button" id="backToLogin">Back to sign in</button>
+    </form>
+
+    <form class="lcard" id="newPwForm" novalidate hidden>
+      <h2 id="newPwTitle">Choose a new password</h2>
+      <p id="newPwIntro">Pick something you'll remember. It needs at least 8 characters.</p>
+      <input type="email" id="npUser" autocomplete="username" hidden>
+      <div class="field"><label for="np1">New password</label><input class="in" id="np1" type="password" autocomplete="new-password"></div>
+      <div class="field"><label for="np2">Type it again</label><input class="in" id="np2" type="password" autocomplete="new-password"></div>
+      <p class="err" id="newPwErr" hidden></p>
+      <button class="btn primary wide" type="submit" id="newPwBtn">Save password</button>
+      <button class="linkbtn" type="button" id="newPwCancel" hidden>Cancel</button>
     </form>
   </div>
 
@@ -135,6 +159,7 @@
 <script src="/js/config.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/topojson/3.0.2/topojson.min.js"></script>
+<script src="/vendor/maplibre-gl.js"></script>
 <script type="module" src="/js/app.js"></script>
 </body>
 </html>

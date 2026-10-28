@@ -5,6 +5,18 @@ import { demoPlanes, DEMO_LOOKUP, demoLive, addSim } from './demo.js';
 
 const SIGNED_URL_SECONDS = 6 * 3600;
 
+// Read what the email link put in the address bar before the Supabase library tidies it away.
+function readAuthLink() {
+  const raw = (location.hash || '').replace(/^#/, '') + '&' + (location.search || '').replace(/^\?/, '');
+  const q = new URLSearchParams(raw);
+  const type = q.get('type');
+  const err = q.get('error_description') || q.get('error');
+  return {
+    intent: type === 'recovery' ? 'reset' : type === 'invite' ? 'invite' : null,
+    error: err ? (/expired|invalid/i.test(err) ? 'That email link has expired or was already used. Ask for a new one below.' : err.replace(/\+/g, ' ')) : null
+  };
+}
+
 export async function createStore(config) {
   if (config && config.SUPABASE_URL && config.SUPABASE_ANON_KEY) return supabaseStore(config);
   return demoStore();
@@ -13,7 +25,13 @@ export async function createStore(config) {
 /* ---------------- Supabase ---------------- */
 async function supabaseStore(config) {
   const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/+esm');
-  const sb = createClient(config.SUPABASE_URL, config.SUPABASE_ANON_KEY, { auth: { persistSession: true, autoRefreshToken: true } });
+  const link = readAuthLink();
+  // 'implicit' so a reset link opened on a different device from the one that asked for it still works.
+  const sb = createClient(config.SUPABASE_URL, config.SUPABASE_ANON_KEY, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, flowType: 'implicit' } });
+  let intent = link.intent;
+  sb.auth.onAuthStateChange(ev => { if (ev === 'PASSWORD_RECOVERY') intent = 'reset'; });
+  await sb.auth.getSession(); // waits until any sign-in link in the address bar has been read
+  if (link.intent || link.error) history.replaceState(null, '', location.pathname);
   const bucket = () => sb.storage.from('media');
 
   async function profileFor(user) {
@@ -66,6 +84,16 @@ async function supabaseStore(config) {
 
   return {
     mode: 'live',
+    authLink: { get intent() { return intent; }, error: link.error, clear() { intent = null; } },
+    async resetPassword(email) {
+      const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + '/' });
+      if (error) throw error;
+    },
+    async setPassword(password) {
+      const { error } = await sb.auth.updateUser({ password });
+      if (error) throw error;
+      intent = null;
+    },
     async currentUser() {
       const { data } = await sb.auth.getSession();
       return profileFor(data.session && data.session.user);
@@ -83,12 +111,20 @@ async function supabaseStore(config) {
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'The lookup service did not answer.');
       return r.json();
     },
+    async airportLive(ap) {
+      const r = await fetch(`/api/airport?icao=${encodeURIComponent(ap.i)}&lat=${ap.y}&lon=${ap.x}&elev=${ap.e || 0}`);
+      if (!r.ok) throw new Error('Live airport info is not available right now.');
+      return r.json();
+    },
     async positions(regs) {
       const r = await fetch('/api/positions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ regs }) });
       if (!r.ok) throw new Error('Live positions are not available right now.');
       return r.json();
     },
     async savePosition(plane, live) {
+      const rpc = await sb.rpc('record_position', { p_plane: plane.id, p_lat: live.lat, p_lon: live.lon, p_alt: live.alt == null ? null : Math.round(live.alt), p_track: live.track, p_on_ground: !!live.onGround });
+      if (!rpc.error) return;
+      // Older database without the record_position function: fall back to a plain update.
       const row = { last_lat: live.lat, last_lon: live.lon, last_alt: live.alt, last_track: live.track, last_on_ground: !!live.onGround, last_seen_at: new Date().toISOString() };
       const { error } = await sb.from('planes').update(row).eq('id', plane.id);
       if (error) throw error;
@@ -150,10 +186,13 @@ async function supabaseStore(config) {
 /* ---------------- Demo ---------------- */
 function demoStore() {
   let planes = demoPlanes();
-  const me = { id: 'demo', email: 'demo', role: 'admin', name: 'Demo' };
+  const me = { id: 'demo', email: 'demo', role: (window.SPOTTERS_CONFIG && window.SPOTTERS_CONFIG.DEMO_ROLE) || 'admin', name: 'Demo' };
   const lid = () => 'local-' + Math.random().toString(36).slice(2);
   return {
     mode: 'demo',
+    authLink: { intent: null, error: null, clear() {} },
+    async resetPassword() {},
+    async setPassword() {},
     async currentUser() { return null; },
     async signIn() { return me; },
     async signOut() {},
@@ -165,6 +204,26 @@ function demoStore() {
       if (hit) { if (hit.sim) addSim(reg, hit.sim); return { reg, ...hit, live: demoLive(reg) }; }
       if (own) return { reg, found: true, icaoType: own.icao_type, type: own.type_name, owner: own.airline, operatorIcao: own.airline_icao, live: demoLive(reg) };
       return { reg, found: false, live: null };
+    },
+    async airportLive(ap) {
+      // Pretend traffic circling the airport, so the panel can be tried without the live feed.
+      const now = Date.now() / 1000, mk = (key, reg, type, cs, phase, dist, brg, alt, gs, rate, track, route) => {
+        const r = dist / 60, b = brg * Math.PI / 180;
+        return { key, reg, type, callsign: cs, phase, dist, alt, gs, rate, track, lat: ap.y + r * Math.cos(b), lon: ap.x + r * Math.sin(b) / Math.cos(ap.y * Math.PI / 180), route };
+      };
+      const k = (now / 15) % 6;
+      const rw = ap.r && ap.r[0] ? ap.r[0] : ['27', 270, '09', 90, 9000];
+      return {
+        at: Date.now(),
+        metar: { station: ap.i, raw: `${ap.i} 281020Z 24012G22KT 9999 FEW020 SCT035 11/06 Q1012`, time: new Date(Date.now() - 18 * 60000).toISOString(), wdir: 240, wspd: 12, wgst: 22, temp: 11, visib: '6+', wx: null, clouds: [{ cover: 'FEW', base: 2000 }, { cover: 'SCT', base: 3500 }], cat: 'VFR' },
+        traffic: [
+          mk('D1', 'G-JZHN', 'B738', 'EXS71', 'landing', 7 - k, (rw[3] + 180) % 360 + 180, 2600 - k * 300, 150, -750, rw[3], { from: 'PMI', fromName: 'Palma' }),
+          mk('D2', 'EI-EBP', 'B738', 'RYR52', 'departing', 4 + k, rw[3], 3000 + k * 600, 210, 2100, rw[3], { to: 'DUB', toName: 'Dublin' }),
+          mk('D3', 'G-JZHA', 'B738', null, 'ground', 0.3, 40, 0, 6, null, 90, null),
+          mk('D4', 'G-TUKO', 'B789', 'TOM26', 'nearby', 14, 300, 9000, 260, 0, 120, { from: 'MAN', fromName: 'Manchester', to: 'MCO', toName: 'Orlando' })
+        ],
+        overhead: 6
+      };
     },
     async positions(regs) {
       const out = {}; regs.forEach(r => { out[r] = demoLive(r); });

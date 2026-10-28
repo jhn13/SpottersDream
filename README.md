@@ -9,7 +9,11 @@ A private plane-spotting logbook. Log aircraft by registration with photos and v
 | Website and `/api` functions | Cloudflare Workers (deploys from this repo) | Free |
 | Login, logbook data, photos and videos | Supabase | Free plan |
 | Live positions | adsb.lol, with airplanes.live as a backup | Free, non-commercial |
-| Aircraft details and routes | adsbdb.com | Free, non-commercial |
+| Aircraft details and routes | adsbdb.com, with adsb.lol as a backup | Free, non-commercial |
+| Map tiles | OpenFreeMap (OpenStreetMap data) | Free |
+| Satellite imagery | Sentinel-2 cloudless by EOX | Free, non-commercial |
+| Airport weather | aviationweather.gov | Free |
+| Airport list and runways | OurAirports (bundled) | Public domain |
 
 Until Supabase is connected, the site runs in **demo mode** with sample planes and saves nothing.
 
@@ -31,11 +35,28 @@ Every push to `main` updates the site automatically.
 5. Back in **SQL Editor**, paste `supabase/add-users.sql`, change the two email addresses, and click **Run**. You should see both accounts listed, one as admin and one as spotter.
 6. Go to **Project Settings → API** and copy the **Project URL** and the **anon public** key into `public/js/config.js`.
 
-### 3. Add it to the iPad and iPhone home screen
+### 3. Database update 2 (view-only accounts)
+Paste `supabase/002-viewers-and-reset.sql` into **SQL Editor** and click **Run**.
+
+### 4. Password reset and invite emails
+Supabase's built-in email only sends to members of your Supabase team, so send through your own iCloud mail instead:
+1. Go to **account.apple.com → Sign-In and Security → App-Specific Passwords** and create one called `Supabase`.
+2. In Supabase, go to **Authentication → Emails → SMTP Settings** and turn on **Enable custom SMTP**:
+   - Sender email: your iCloud address
+   - Sender name: `Spotter's Logbook`
+   - Host: `smtp.mail.me.com`, Port: `587`
+   - Username: your iCloud address, Password: the app-specific password
+3. In **Authentication → URL Configuration**, set **Site URL** to the site's address and add the same address to **Redirect URLs**.
+
+### 5. Inviting family and friends (view only)
+**Authentication → Users → Add user → Send invitation**, and enter their email. They tap the link, choose a password, and can see everything but can't add or delete. To make someone a spotter or admin, change their `role` in the `profiles` table.
+
+### 6. Add it to the iPad and iPhone home screen
 Open the site in Safari, tap **Share → Add to Home Screen**. It then opens full screen like an app and remembers the sign-in.
 
 ## Who can do what
 
+- **Viewer:** see everything (globe, logbook, stats, airports) but can't add or delete. Everyone you add in Supabase starts as a viewer.
 - **Spotter:** add spots, photos and videos, and see everything.
 - **Admin:** everything above, plus deleting spots, photos and planes, and downloading a backup (Logbook → Download backup).
 - Nobody else can sign up. Each request is checked by the database's security rules, and photos sit in a private bucket that's served through links that expire.
@@ -52,13 +73,16 @@ Open the site in Safari, tap **Share → Add to Home Screen**. It then opens ful
 ```
 wrangler.jsonc     Cloudflare settings
 public/            the website (Cloudflare serves this folder)
-  js/app.js        globe, logbook, stats, add-a-spot
+  js/app.js        logbook, stats, airports, add-a-spot, sign-in
+  js/map.js        the 3D globe (MapLibre), map and satellite styles
+  vendor/          MapLibre GL JS 5.24.0
+  data/airports.json  airports and runways from OurAirports
   js/store.js      Supabase and demo data
   js/media.js      photo shrinking, video thumbnails, photo date and location
   js/data.js       airports, airlines, aircraft types, landmarks
   js/config.js     Supabase connection details
 worker/index.js    Cloudflare entry point: sends /api/* to the functions, everything else to public/
-functions/api/     /api/lookup and /api/positions
+functions/api/     /api/lookup, /api/positions and /api/airport
 lib/flight.js      shared code for the API functions
 supabase/          database setup scripts
 ```

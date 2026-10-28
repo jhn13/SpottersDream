@@ -2,8 +2,9 @@
 // /api/* goes to the flight data functions; everything else is the website in public/.
 import * as lookup from '../functions/api/lookup.js';
 import * as positions from '../functions/api/positions.js';
+import * as airport from '../functions/api/airport.js';
 
-const ROUTES = { '/api/lookup': lookup, '/api/positions': positions };
+const ROUTES = { '/api/lookup': lookup, '/api/positions': positions, '/api/airport': airport };
 
 export default {
   async fetch(request, env, ctx) {
