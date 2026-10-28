@@ -216,6 +216,54 @@ document.addEventListener("click", e => { if (e.target.closest("[data-close]")) 
 document.addEventListener("keydown", e => { if (e.key === "Escape") { if (!$("#celebrate").hidden) $("#celebrate").hidden = true; else if (!$("#lightbox").hidden) closeLightbox(); else closeSheets(); } });
 
 /* ================= plane detail ================= */
+function ageOf(d) {
+  if (!d) return null;
+  const iso = d.firstFlight || d.built;
+  if (iso && iso.length >= 7) { const yrs = (Date.now() - Date.parse(iso.length === 4 ? iso + "-07-01" : iso)) / (365.25 * 864e5); return { years: yrs, exact: iso.length > 4, year: +iso.slice(0, 4) }; }
+  if (d.year) return { years: new Date().getFullYear() - d.year, exact: false, year: d.year };
+  return null;
+}
+function ageText(a) {
+  if (!a) return null;
+  if (a.years < 1) { const m = Math.max(1, Math.round(a.years * 12)); return `${m} ${m === 1 ? "month" : "months"} old`; }
+  const y = Math.floor(a.years); return `${a.exact ? "" : "About "}${y} ${y === 1 ? "year" : "years"} old`;
+}
+function ageNote(a) {
+  if (!a) return "";
+  if (a.years < 1) return "Brand new! Still has that new-plane smell.";
+  if (a.years < 3) return "Nearly new.";
+  if (a.years >= 30) return "A real veteran of the skies.";
+  if (a.years >= 20) return "An old timer. Airliners usually fly for about 25 years.";
+  return "";
+}
+const detailsAsked = new Set();
+async function ensureDetails(p) {
+  if (p.details || detailsAsked.has(p.id) || !store) return;
+  detailsAsked.add(p.id);
+  try {
+    const d = await store.details(p);
+    p.details = d;
+    if (canAdd()) { const fields = { details: d }; if (d.hex && !p.hex) fields.hex = d.hex; store.updatePlane(p, fields).catch(() => {}); }
+    if (selected === p.id && $("#detail").classList.contains("open")) { const sb = $("#detail .sh-body"), st = sb ? sb.scrollTop : 0; renderDetail(p); const nb = $("#detail .sh-body"); if (nb) nb.scrollTop = st; }
+  } catch (e) { p.details = { checked: new Date().toISOString() }; }
+}
+function factsBlock(p) {
+  const d = p.details;
+  if (!d) return `<section><h3 class="eyebrow">Plane facts</h3><p class="hint">Looking up how old ${esc(p.reg)} is…</p></section>`;
+  const a = ageOf(d), rows = [];
+  if (d.firstFlight) rows.push(["First flight", fmtDate(d.firstFlight)]);
+  else if (d.built && d.built.length > 4) rows.push(["Built", fmtDate(d.built)]);
+  else if (a) rows.push(["Built", String(a.year)]);
+  if (d.model) rows.push(["Exact model", d.model]);
+  if (d.msn) rows.push(["Serial number", d.msn + (d.line ? ` (line ${d.line})` : "")]);
+  if (d.engines) rows.push(["Engines", d.engines]);
+  if (d.owner && d.owner !== p.airline) rows.push(["Owner", d.owner]);
+  if (!a && !rows.length) return `<section><h3 class="eyebrow">Plane facts</h3><p class="hint">We couldn't find the age of this plane.</p></section>`;
+  return `<section><h3 class="eyebrow">Plane facts</h3>
+    ${a ? `<div class="agecard"><b>${esc(ageText(a))}</b>${ageNote(a) ? `<span>${esc(ageNote(a))}</span>` : ""}</div>` : ""}
+    ${rows.length ? `<dl class="facts">${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl>` : ""}
+  </section>`;
+}
 const busSVG = '<svg viewBox="0 0 18 11"><rect x=".5" y=".5" width="17" height="8.5" rx="1.6" fill="#D2232A"/><rect x="2" y="2" width="14" height="2.2" fill="#fff" opacity=".85"/><rect x="2" y="5.4" width="14" height="2" fill="#fff" opacity=".6"/><circle cx="4.5" cy="9.5" r="1.3" fill="#222"/><circle cx="13.5" cy="9.5" r="1.3" fill="#222"/></svg>';
 function statusBlock(p) {
   if (p.live) {
@@ -268,6 +316,7 @@ function renderDetail(p) {
       ${statusBlock(p)}
       ${media.length ? `<section><h3 class="eyebrow">Photos and videos · ${media.length}</h3><div class="media">${tiles}</div></section>` : ""}
       <section><h3 class="eyebrow">Spotted ${n === 1 ? "once" : n === 2 ? "twice" : n + " times"}</h3><ul class="sightings">${sights}</ul></section>
+      ${factsBlock(p)}
       ${ty ? `<section><h3 class="eyebrow">About the ${esc(ty.name)}</h3>
         <dl class="pfacts"><div><dt>Wingspan</dt><dd>${ty.span.toFixed(1)} m<small>About ${buses} London buses end to end</small><span class="buses">${busSVG.repeat(Math.ceil(buses))}</span></dd></div>
         <div><dt>Seats</dt><dd>${esc(ty.seats)}<small>${ty.wide ? "Wide-body: two aisles" : "Narrow-body: one aisle"}</small></dd></div></dl>
@@ -315,7 +364,7 @@ function pickMediaFor(p, s) {
 }
 function select(id, fly) {
   const p = PLANES.find(x => x.id === id); if (!p) return;
-  selected = id; renderDetail(p); openSheet("detail"); syncMap();
+  selected = id; renderDetail(p); openSheet("detail"); syncMap(); ensureDetails(p);
   if (fly) { const ll = posOf(p) || (getAirport(latest(p).airport) || {}).c; if (ll) flyTo(ll, !posOf(p) ? 10 : onGround(p) ? 12 : 4.2); }
 }
 
@@ -422,6 +471,8 @@ function badgeList() {
     ["Long hauler", "One of your planes flies 5,000 miles in one go", longest >= 5000 ? 1 : 0, 1, '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/>'],
     ["Airline collector", "Spot 10 different airlines", Math.min(airlines.size, 10), 10, '<path d="M5 21l4-17h6l4 17z"/><path d="M8 13h8"/>'],
     ["Queen of the Skies", "Spot a Boeing 747", [...types].some(t => /^B74/.test(t)) ? 1 : 0, 1, '<path d="M12 2l2 6h6l-5 4 2 7-5-4-5 4 2-7-5-4h6z"/>'],
+    ["Old timer", "Spot a plane over 25 years old", PLANES.some(p => { const a = ageOf(p.details); return a && a.years >= 25; }) ? 1 : 0, 1, '<circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2M9 2h6"/>'],
+    ["Fresh off the line", "Spot a plane less than a year old", PLANES.some(p => { const a = ageOf(p.details); return a && a.years < 1; }) ? 1 : 0, 1, '<path d="M12 3l1.8 4.2L18 9l-4.2 1.8L12 15l-1.8-4.2L6 9l4.2-1.8z"/><path d="M18 15l.9 2.1L21 18l-2.1.9L18 21l-.9-2.1L15 18l2.1-.9z"/>'],
     ["Half century", "Log 50 spots", Math.min(total, 50), 50, '<circle cx="12" cy="12" r="9"/><path d="M9 8.5h5M9 8.5v3.5h2.5a2.5 2.5 0 0 1 0 5H9"/>']
   ];
 }
@@ -464,6 +515,8 @@ function renderStats() {
         ${tile("Most spotted plane", `<span class="v mono">${esc(topPlane.reg)}</span>`, `${spots(topPlane)} ${spots(topPlane) === 1 ? "time" : "times"}${topPlane.airline ? " · " + esc(topPlane.airline) : ""}`, thumb ? `<img src="${thumb}" alt="">` : "", topPlane.id)}
         ${types.length ? tile("Favourite type", `<span class="v">${esc(types[0][0])}</span>`, `${types[0][1]} spots`) : ""}
         ${tile("Favourite airport", `<span class="v">${esc(apName(aps[0][0]))}</span>`, `${aps[0][1]} spots`)}
+        ${(() => { const aged = PLANES.map(p => ({ p, a: ageOf(p.details) })).filter(x => x.a).sort((x, y) => y.a.years - x.a.years); if (aged.length < 1) return ""; const o = aged[0], n = aged[aged.length - 1];
+          return tile("Oldest plane", `<span class="v mono">${esc(o.p.reg)}</span>`, esc(ageText(o.a)), "", o.p.id) + (aged.length > 1 ? tile("Newest plane", `<span class="v mono">${esc(n.p.reg)}</span>`, esc(ageText(n.a)), "", n.p.id) : ""); })()}
       </div></section>
       <section><h3 class="eyebrow">Your planes right now</h3><div class="now">
         ${hi ? tile("Highest flyer", `<span class="v mono">${esc(hi.reg)}</span>`, `${num(hi.live.alt)} ft up`, "", hi.id) : tile("Highest flyer", `<span class="v">None flying</span>`, "Check back later")}
@@ -1040,9 +1093,9 @@ setInterval(() => syncMap(), 60000);
 
 /* ================= data loading ================= */
 async function reload(selectId) {
-  const prevLive = Object.fromEntries(PLANES.map(p => [p.reg, { live: p.live, liveAt: p.liveAt }]));
+  const prevLive = Object.fromEntries(PLANES.map(p => [p.reg, { live: p.live, liveAt: p.liveAt, details: p.details }]));
   PLANES = await store.loadAll();
-  PLANES.forEach(p => { if (prevLive[p.reg]) Object.assign(p, prevLive[p.reg]); });
+  PLANES.forEach(p => { const o = prevLive[p.reg]; if (o) { p.live = o.live; p.liveAt = o.liveAt; if (!p.details && o.details) p.details = o.details; } });
   dataLoadedAt = Date.now();
   syncMap(); updBrand(); updWelcome();
   if (selectId && PLANES.find(p => p.id === selectId) && $("#detail").classList.contains("open")) renderDetail(PLANES.find(p => p.id === selectId));
@@ -1060,6 +1113,7 @@ function showAuth(view, opt = {}) {
     $("#loginForm").hidden = false;
     $("#demoNote").hidden = store.mode !== "demo";
     $("#toForgot").hidden = store.mode === "demo";
+    $("#rememberMe").checked = store.remember !== false;
     const le = $("#loginErr"); le.hidden = !opt.msg; le.textContent = opt.msg || "";
     setTimeout(() => $("#em").focus(), 100);
   } else if (view === "forgot") {
@@ -1087,7 +1141,7 @@ $("#loginForm").addEventListener("submit", async e => {
   if (store.mode !== "demo" && (!email || !pw)) { le.textContent = "Enter your email and password."; le.hidden = false; return; }
   btn.disabled = true; btn.textContent = "Signing in…"; le.hidden = true;
   try {
-    const user = await store.signIn(email, pw);
+    const user = await store.signIn(email, pw, $("#rememberMe").checked);
     if (!user.role) { await store.signOut(); throw new Error("This account hasn't been given access yet. Ask Dad to add it."); }
     me = user; $("#pw").value = "";
     await startApp();
@@ -1146,6 +1200,8 @@ async function startApp() {
   catch (e) { toast("Couldn't load the logbook: " + e.message, 6000); }
   refreshPositions(); startPositionLoop();
   loadAlerts().then(() => { if (ALERTS.some(a => a.active && a.place === "me")) updateHere(true); });
+  // Fill in plane ages quietly in the background, a few at a time, so stats and badges can use them.
+  (async () => { for (const p of PLANES.filter(p => !p.details).slice(0, 40)) { await ensureDetails(p); await new Promise(r => setTimeout(r, 400)); } if ($("#stats").classList.contains("open")) renderStats(); })();
   const want = new URLSearchParams(location.search).get("plane");
   if (want) { history.replaceState(null, "", location.pathname); openPlaneByReg(want.toUpperCase()); }
 }

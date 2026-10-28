@@ -14,6 +14,7 @@ A private plane-spotting logbook. Log aircraft by registration with photos and v
 | Satellite imagery | Sentinel-2 cloudless by EOX | Free, non-commercial |
 | Airport weather | aviationweather.gov | Free |
 | Airport list and runways | OurAirports (bundled) | Public domain |
+| Plane age, serial number, engines | OpenSky Network aircraft database | Free |
 
 Until Supabase is connected, the site runs in **demo mode** with sample planes and saves nothing.
 
@@ -60,7 +61,10 @@ The background job then runs every 2 minutes: it checks planes with alerts plus 
 
 On iPhone and iPad, notifications only work when the app is opened from its Home Screen icon (Apple's rule).
 
-### 7. Add it to the iPad and iPhone home screen
+### 7. Plane facts (database update 4)
+Paste `supabase/004-plane-details.sql` into **SQL Editor** and click **Run**. Plane ages, serial numbers and engines (from the OpenSky Network aircraft database, or the live feed's build year) are then saved once per plane instead of looked up every time.
+
+### 8. Add it to the iPad and iPhone home screen
 Open the site in Safari, tap **Share → Add to Home Screen**. It then opens full screen like an app and remembers the sign-in.
 
 ## Who can do what

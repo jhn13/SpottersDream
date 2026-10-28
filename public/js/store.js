@@ -27,7 +27,15 @@ async function supabaseStore(config) {
   const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/+esm');
   const link = readAuthLink();
   // 'implicit' so a reset link opened on a different device from the one that asked for it still works.
-  const sb = createClient(config.SUPABASE_URL, config.SUPABASE_ANON_KEY, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, flowType: 'implicit' } });
+  // "Keep me signed in": the session lives in localStorage (stays after closing) or sessionStorage (ends with the app).
+  const REMEMBER = 'spotters.remember';
+  const remember = () => { try { return localStorage.getItem(REMEMBER) !== '0'; } catch (e) { return true; } };
+  const storage = {
+    getItem: k => { try { return localStorage.getItem(k) ?? sessionStorage.getItem(k); } catch (e) { return null; } },
+    setItem: (k, v) => { try { const keep = remember(); (keep ? localStorage : sessionStorage).setItem(k, v); (keep ? sessionStorage : localStorage).removeItem(k); } catch (e) { /* storage blocked */ } },
+    removeItem: k => { try { localStorage.removeItem(k); sessionStorage.removeItem(k); } catch (e) { /* storage blocked */ } }
+  };
+  const sb = createClient(config.SUPABASE_URL, config.SUPABASE_ANON_KEY, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, flowType: 'implicit', storage } });
   let intent = link.intent;
   sb.auth.onAuthStateChange(ev => { if (ev === 'PASSWORD_RECOVERY') intent = 'reset'; });
   await sb.auth.getSession(); // waits until any sign-in link in the address bar has been read
@@ -70,7 +78,7 @@ async function supabaseStore(config) {
       (sightBy[s.plane_id] = sightBy[s.plane_id] || []).push({ ...s, media: mediaBy[s.id] || [] });
     });
     return pl.data.map(p => ({
-      id: p.id, reg: p.reg, hex: p.hex, icao_type: p.icao_type, type_name: p.type_name, airline: p.airline, airline_icao: p.airline_icao,
+      id: p.id, reg: p.reg, hex: p.hex, icao_type: p.icao_type, type_name: p.type_name, airline: p.airline, airline_icao: p.airline_icao, details: p.details || null,
       last: p.last_seen_at && p.last_lat != null ? { lat: p.last_lat, lon: p.last_lon, alt: p.last_alt, track: p.last_track, onGround: !!p.last_on_ground, at: Date.parse(p.last_seen_at) } : null,
       live: null,
       sightings: sightBy[p.id] || []
@@ -98,7 +106,9 @@ async function supabaseStore(config) {
       const { data } = await sb.auth.getSession();
       return profileFor(data.session && data.session.user);
     },
-    async signIn(email, password) {
+    get remember() { return remember(); },
+    async signIn(email, password, keep = true) {
+      try { localStorage.setItem(REMEMBER, keep ? '1' : '0'); } catch (e) { /* ignore */ }
       const { data, error } = await sb.auth.signInWithPassword({ email, password });
       if (error) throw error;
       return profileFor(data.user);
@@ -140,6 +150,14 @@ async function supabaseStore(config) {
       const r = await fetch(`/api/airport?icao=${encodeURIComponent(ap.i)}&lat=${ap.y}&lon=${ap.x}&elev=${ap.e || 0}`);
       if (!r.ok) throw new Error('Live airport info is not available right now.');
       return r.json();
+    },
+    async details(plane) {
+      const r = await fetch(`/api/aircraft?reg=${encodeURIComponent(plane.reg)}${plane.hex ? '&hex=' + encodeURIComponent(plane.hex) : ''}`);
+      if (!r.ok) throw new Error('No details');
+      const j = await r.json();
+      const d = { built: j.built, firstFlight: j.firstFlight, year: j.year, msn: j.msn, line: j.line, engines: j.engines, model: j.model, manufacturer: j.manufacturer, owner: j.owner, operator: j.operator, checked: new Date().toISOString() };
+      if (!plane.hex && j.hex) d.hex = j.hex;
+      return d;
     },
     async positions(regs) {
       // Small batches in parallel: each one stays well inside Cloudflare's per-request limits.
@@ -252,6 +270,7 @@ function demoStore() {
     async resetPassword() {},
     async setPassword() {},
     async currentUser() { return null; },
+    remember: true,
     async signIn() { return me; },
     async signOut() {},
     onSignedOut() {},
@@ -274,6 +293,11 @@ function demoStore() {
     async savePushSub() {},
     async deletePushSub() {},
     async testPush() { throw new Error('Notifications don\'t work in demo mode.'); },
+    async details(plane) {
+      const seed = [...plane.reg].reduce((a, c) => a + c.charCodeAt(0), 0);
+      const yr = 2026 - (seed % 22);
+      return { built: `${yr}-0${1 + seed % 9}-15`, firstFlight: `${yr}-0${1 + seed % 9}-02`, msn: String(1000 + seed * 7), engines: plane.icao_type && plane.icao_type.startsWith('B7') ? 'CFM56-7B26' : 'CFM56-5B4', model: plane.type_name, owner: plane.airline, checked: new Date().toISOString() };
+    },
     async airportLive(ap) {
       // Pretend traffic circling the airport, so the panel can be tried without the live feed.
       const now = Date.now() / 1000, mk = (key, reg, type, cs, phase, dist, brg, alt, gs, rate, track, route) => {

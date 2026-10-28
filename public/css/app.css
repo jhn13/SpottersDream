@@ -468,3 +468,11 @@ body.viewer #openAdd, body.viewer #welcomeAdd, body.viewer .logit{display:none!i
 .leader .cnt{font:700 18px/1 var(--f-display);color:var(--route)}
 /* Stop the app frame ever being scrolled sideways (e.g. by the iPad keyboard or scrollIntoView). */
 #app{overflow:hidden;overflow:clip}
+.check{display:flex;align-items:center;gap:9px;font-size:15px;cursor:pointer}
+.check input{width:20px;height:20px;accent-color:var(--ink)}
+.agecard{display:flex;flex-direction:column;gap:3px;background:color-mix(in srgb,var(--live) 18%,var(--panel-2));border-radius:12px;padding:12px 14px;margin-bottom:10px}
+.agecard b{font:700 24px/1.1 var(--f-display)}
+.agecard span{font-size:13.5px;color:var(--muted)}
+dl.facts{display:grid;grid-template-columns:auto 1fr;gap:8px 16px;margin:0}
+dl.facts dt{color:var(--muted);font-size:13.5px}
+dl.facts dd{margin:0;font-weight:600;min-width:0;overflow-wrap:anywhere}
