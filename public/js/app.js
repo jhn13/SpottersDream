@@ -1071,7 +1071,7 @@ async function refreshPositions() {
 }
 function startPositionLoop() {
   clearInterval(posTimer);
-  posTimer = setInterval(() => { if (document.visibilityState === "visible") refreshPositions(); }, store.mode === "demo" ? 10000 : 30000);
+  posTimer = setInterval(() => { if (document.visibilityState === "visible") refreshPositions(); }, store.mode === "demo" ? 10000 : 40000);
 }
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "visible" || !me) return;

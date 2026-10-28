@@ -6,9 +6,10 @@ import * as positions from '../functions/api/positions.js';
 import * as airport from '../functions/api/airport.js';
 import * as push from '../functions/api/push.js';
 import * as aircraft from '../functions/api/aircraft.js';
+import * as routes from '../functions/api/routes.js';
 import { runCron } from '../lib/cron.js';
 
-const ROUTES = { '/api/lookup': lookup, '/api/positions': positions, '/api/airport': airport, '/api/aircraft': aircraft };
+const ROUTES = { '/api/lookup': lookup, '/api/positions': positions, '/api/airport': airport, '/api/aircraft': aircraft, '/api/routes': routes };
 
 export default {
   async fetch(request, env, ctx) {

@@ -102,7 +102,7 @@ export async function onRequestGet({ request, env }) {
         return metarOf(Array.isArray(j) ? j[0] : null);
       } catch (e) { return null; }
     }) : Promise.resolve(null),
-    cached(`traffic:${lat},${lon}`, 12, () => traffic(lat, lon, elev, env)).catch(() => null)
+    u.searchParams.get('traffic') === '0' ? Promise.resolve(null) : cached(`traffic:${lat},${lon}`, 12, () => traffic(lat, lon, elev, env)).catch(() => null)
   ]);
 
   // Where are the arriving and departing ones going or coming from? (cached, so cheap)

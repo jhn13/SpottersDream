@@ -22,6 +22,121 @@ export async function createStore(config) {
   return demoStore();
 }
 
+/* ---------------- live positions straight from the browser ----------------
+   The free trackers limit requests per internet address. Cloudflare's servers share addresses with
+   thousands of other sites, so asking from the iPad itself (your own home or mobile connection) works far better. */
+function shapeAc(ac) {
+  if (!ac) return null;
+  let lat = ac.lat, lon = ac.lon, seenPos = ac.seen_pos;
+  if ((lat == null || lon == null) && ac.lastPosition) { lat = ac.lastPosition.lat; lon = ac.lastPosition.lon; seenPos = ac.lastPosition.seen_pos; }
+  if (lat == null || lon == null) return null;
+  const onGround = ac.alt_baro === 'ground';
+  return {
+    lat: +lat, lon: +lon, onGround,
+    alt: onGround ? 0 : (typeof ac.alt_baro === 'number' ? ac.alt_baro : (typeof ac.alt_geom === 'number' ? ac.alt_geom : null)),
+    gs: typeof ac.gs === 'number' ? Math.round(ac.gs) : null,
+    rate: typeof ac.baro_rate === 'number' ? ac.baro_rate : (typeof ac.geom_rate === 'number' ? ac.geom_rate : null),
+    track: typeof ac.track === 'number' ? ac.track : (typeof ac.true_heading === 'number' ? ac.true_heading : null),
+    callsign: (ac.flight || '').trim() || null,
+    hex: ac.hex ? String(ac.hex).replace(/^~/, '').toUpperCase() : null,
+    seenPos: typeof seenPos === 'number' ? Math.round(seenPos) : (typeof ac.seen === 'number' ? Math.round(ac.seen) : null)
+  };
+}
+const normReg = s => String(s || '').toUpperCase().replace(/[^A-Z0-9-]/g, '');
+let directBlockedUntil = 0;
+async function directLive(regs) {
+  if (Date.now() < directBlockedUntil) throw new Error('direct paused');
+  const out = {};
+  for (let i = 0; i < regs.length; i += 60) {
+    const chunk = regs.slice(i, i + 60);
+    const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 9000);
+    let r;
+    try { r = await fetch('https://api.adsb.lol/v2/reg/' + chunk.map(encodeURIComponent).join(','), { signal: ctl.signal, headers: { Accept: 'application/json' } }); }
+    catch (e) { directBlockedUntil = Date.now() + 5 * 60000; throw e; }   // blocked by the browser or offline: use the server for a while
+    finally { clearTimeout(t); }
+    if (r.status === 429) { directBlockedUntil = Date.now() + 90000; throw new Error('HTTP 429'); }
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    chunk.forEach(reg => { out[reg] = null; });
+    (j.ac || []).forEach(ac => { const reg = normReg(ac.r); if (reg in out && !out[reg]) out[reg] = shapeAc(ac); });
+  }
+  return out;
+}
+// Planes around an airport, straight from the browser (same reason as above).
+function phaseOf(ac, elev) {
+  const ground = ac.alt_baro === 'ground';
+  const alt = ground ? elev : (typeof ac.alt_baro === 'number' ? ac.alt_baro : (typeof ac.alt_geom === 'number' ? ac.alt_geom : null));
+  if (alt == null) return null;
+  const agl = alt - elev, rate = typeof ac.baro_rate === 'number' ? ac.baro_rate : (typeof ac.geom_rate === 'number' ? ac.geom_rate : 0), gs = typeof ac.gs === 'number' ? ac.gs : 0;
+  if (ground || (agl < 200 && gs < 80)) return { phase: 'ground', alt: 0 };
+  if (agl >= 12000) return { phase: 'high', alt };
+  if (rate <= -300) return { phase: 'landing', alt };
+  if (rate >= 300) return { phase: 'departing', alt };
+  return { phase: 'nearby', alt };
+}
+function nm(lat1, lon1, lat2, lon2) {
+  const r = Math.PI / 180, h = Math.sin((lat2 - lat1) * r / 2) ** 2 + Math.cos(lat1 * r) * Math.cos(lat2 * r) * Math.sin((lon2 - lon1) * r / 2) ** 2;
+  return 2 * 3440.1 * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+async function directTraffic(ap) {
+  if (Date.now() < directBlockedUntil) throw new Error('direct paused');
+  const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 9000);
+  let r;
+  try { r = await fetch(`https://api.adsb.lol/v2/point/${ap.y}/${ap.x}/25`, { signal: ctl.signal, headers: { Accept: 'application/json' } }); }
+  catch (e) { directBlockedUntil = Date.now() + 5 * 60000; throw e; }
+  finally { clearTimeout(t); }
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  const j = await r.json(), elev = ap.e || 0, out = []; let overhead = 0;
+  for (const ac of j.ac || []) {
+    if (ac.lat == null || ac.lon == null) continue;
+    if (typeof ac.category === 'string' && /^C/.test(ac.category)) continue;
+    if (!ac.r && !ac.flight && !ac.t) continue;
+    const ph = phaseOf(ac, elev); if (!ph) continue;
+    if (ph.phase === 'high') { overhead++; continue; }
+    out.push({ key: String(ac.hex || ac.r || ac.flight).replace(/^~/, '').toUpperCase(), reg: ac.r || null, type: ac.t || null, callsign: (ac.flight || '').trim() || null,
+      alt: ph.alt, gs: typeof ac.gs === 'number' ? Math.round(ac.gs) : null, rate: ac.baro_rate ?? ac.geom_rate ?? null,
+      track: typeof ac.track === 'number' ? ac.track : null, lat: ac.lat, lon: ac.lon, dist: Math.round(nm(ap.y, ap.x, ac.lat, ac.lon) * 10) / 10, phase: ph.phase });
+  }
+  const order = { landing: 0, departing: 1, nearby: 2, ground: 3 };
+  out.sort((a, b) => order[a.phase] - order[b.phase] || a.dist - b.dist);
+  return { traffic: out.slice(0, 40), overhead };
+}
+export async function airportLiveVia(ap) {
+  const [wx, tr] = await Promise.all([
+    fetch(`/api/airport?icao=${encodeURIComponent(ap.i)}&lat=${ap.y}&lon=${ap.x}&elev=${ap.e || 0}&traffic=0`).then(r => r.ok ? r.json() : null).catch(() => null),
+    directTraffic(ap).catch(() => null)
+  ]);
+  if (!tr) {   // browser couldn't reach the tracker: let the server try for everything
+    const r = await fetch(`/api/airport?icao=${encodeURIComponent(ap.i)}&lat=${ap.y}&lon=${ap.x}&elev=${ap.e || 0}`);
+    if (!r.ok) throw new Error('Live airport info is not available right now.');
+    return r.json();
+  }
+  const want = tr.traffic.filter(t => t.callsign && t.phase !== 'ground').slice(0, 10);
+  if (want.length) {
+    try {
+      const r = await fetch('/api/routes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ flights: want.map(t => ({ reg: t.key, callsign: t.callsign, lat: t.lat, lon: t.lon, track: t.track })) }) });
+      if (r.ok) { const j = await r.json(); want.forEach(t => { const rt = j.routes && j.routes[t.key]; if (rt) t.route = { from: rt.from.code, fromName: rt.from.city || rt.from.name, to: rt.to.code, toName: rt.to.city || rt.to.name }; }); }
+    } catch (e) { /* routes are a bonus */ }
+  }
+  return { at: Date.now(), metar: wx && wx.metar, traffic: tr.traffic, overhead: tr.overhead };
+}
+
+export async function livePositions(regs) {
+  try {
+    const planes = await directLive(regs);
+    const flying = Object.entries(planes).filter(([, p]) => p && p.callsign && !p.onGround).map(([reg, p]) => ({ reg, callsign: p.callsign, lat: p.lat, lon: p.lon, track: p.track }));
+    if (flying.length) {
+      try {
+        const r = await fetch('/api/routes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ flights: flying }) });
+        if (r.ok) { const j = await r.json(); Object.entries(j.routes || {}).forEach(([reg, route]) => { if (planes[reg]) planes[reg].route = route; }); }
+      } catch (e) { /* routes are a bonus */ }
+    }
+    return { at: Date.now(), planes, errors: 0, failed: [], via: 'browser' };
+  } catch (e) {
+    return null;   // fall back to asking via the server
+  }
+}
+
 /* ---------------- Supabase ---------------- */
 async function supabaseStore(config) {
   const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/+esm');
@@ -146,11 +261,7 @@ async function supabaseStore(config) {
       const r = await fetch('/api/push/test', { method: 'POST', headers: { Authorization: 'Bearer ' + (data.session ? data.session.access_token : '') } });
       const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || 'The test didn\'t send.');
     },
-    async airportLive(ap) {
-      const r = await fetch(`/api/airport?icao=${encodeURIComponent(ap.i)}&lat=${ap.y}&lon=${ap.x}&elev=${ap.e || 0}`);
-      if (!r.ok) throw new Error('Live airport info is not available right now.');
-      return r.json();
-    },
+    async airportLive(ap) { return airportLiveVia(ap); },
     async details(plane) {
       const r = await fetch(`/api/aircraft?reg=${encodeURIComponent(plane.reg)}${plane.hex ? '&hex=' + encodeURIComponent(plane.hex) : ''}`);
       if (!r.ok) throw new Error('No details');
@@ -160,7 +271,9 @@ async function supabaseStore(config) {
       return d;
     },
     async positions(regs) {
-      // Small batches in parallel: each one stays well inside Cloudflare's per-request limits.
+      const direct = await livePositions(regs);
+      if (direct) return direct;
+      // Fallback: ask via the server, in batches.
       const chunks = [];
       for (let i = 0; i < regs.length; i += 100) chunks.push(regs.slice(i, i + 100));
       const out = { at: Date.now(), planes: {}, errors: 0, failed: [] };
