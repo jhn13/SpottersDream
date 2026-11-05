@@ -18,6 +18,8 @@ function readAuthLink() {
 }
 
 export async function createStore(config) {
+  const view = new URLSearchParams(location.search).get('view');
+  if (view) return publicStore(view, config);
   if (config && config.SUPABASE_URL && config.SUPABASE_ANON_KEY) return supabaseStore(config);
   return demoStore();
 }
@@ -135,6 +137,69 @@ export async function livePositions(regs) {
   } catch (e) {
     return null;   // fall back to asking via the server
   }
+}
+
+// Fallback: ask via the server, in batches.
+async function serverPositions(regs) {
+  const chunks = [];
+  for (let i = 0; i < regs.length; i += 100) chunks.push(regs.slice(i, i + 100));
+  const out = { at: Date.now(), planes: {}, errors: 0, failed: [] };
+  await Promise.all(chunks.map(async chunk => {
+    try {
+      const r = await fetch('/api/positions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ regs: chunk }) });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json();
+      Object.assign(out.planes, j.planes || {});
+      (j.failed || []).forEach(reg => out.failed.push(reg));
+      if (j.sourceErrors && j.sourceErrors.length) console.warn('Live data problem:', j.sourceErrors.join(' | '));
+    } catch (e) {
+      chunk.forEach(reg => out.failed.push(reg));
+    }
+  }));
+  out.errors = out.failed.length;
+  if (out.errors === regs.length) throw new Error('Live positions are not available right now.');
+  return out;
+}
+
+async function planeDetails(plane) {
+  const r = await fetch(`/api/aircraft?reg=${encodeURIComponent(plane.reg)}${plane.hex ? '&hex=' + encodeURIComponent(plane.hex) : ''}`);
+  if (!r.ok) throw new Error('No details');
+  const j = await r.json();
+  const d = { built: j.built, firstFlight: j.firstFlight, year: j.year, msn: j.msn, line: j.line, engines: j.engines, model: j.model, manufacturer: j.manufacturer, owner: j.owner, operator: j.operator, checked: new Date().toISOString() };
+  if (!plane.hex && j.hex) d.hex = j.hex;
+  return d;
+}
+
+const readOnly = () => { throw new Error('This is a view-only link.'); };
+
+/* ---------------- Share link (view only, no sign-in) ---------------- */
+function publicStore(token, config) {
+  const demo = !(config && config.SUPABASE_URL) && token === 'demo';
+  const base = demo ? demoStore() : null;
+  const guest = { id: 'guest', email: '', role: 'viewer', name: 'Guest', guest: true };
+  return {
+    mode: 'public',
+    authLink: { intent: null, error: null, clear() {} },
+    async currentUser() { return guest; },
+    remember: false,
+    async signIn() { return guest; }, async signOut() {}, onSignedOut() {},
+    async resetPassword() {}, async setPassword() { readOnly(); },
+    async loadAll() {
+      if (base) return base.loadAll();
+      const r = await fetch('/api/public/' + encodeURIComponent(token));
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) { const e = new Error(j.error || 'This link isn\'t working.'); e.linkOff = r.status === 404; throw e; }
+      return (j.planes || []).map(p => ({ ...p, live: null }));
+    },
+    async positions(regs) { return base ? base.positions(regs) : ((await livePositions(regs)) || serverPositions(regs)); },
+    async airportLive(ap) { return base ? base.airportLive(ap) : airportLiveVia(ap); },
+    async details(plane) { return base ? base.details(plane) : planeDetails(plane); },
+    async savePosition() {}, async updatePlane() {},
+    async getAlerts() { return []; }, async getSettings() { return {}; }, async saveSettings() {},
+    addAlert: readOnly, updateAlert: readOnly, deleteAlert: readOnly,
+    async pushKey() { readOnly(); }, async savePushSub() {}, async deletePushSub() {}, async testPush() { readOnly(); },
+    lookup: readOnly, addSpot: readOnly, addMedia: readOnly, deleteSighting: readOnly, deleteMedia: readOnly, deletePlane: readOnly
+  };
 }
 
 /* ---------------- Supabase ---------------- */
@@ -262,37 +327,16 @@ async function supabaseStore(config) {
       const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || 'The test didn\'t send.');
     },
     async airportLive(ap) { return airportLiveVia(ap); },
-    async details(plane) {
-      const r = await fetch(`/api/aircraft?reg=${encodeURIComponent(plane.reg)}${plane.hex ? '&hex=' + encodeURIComponent(plane.hex) : ''}`);
-      if (!r.ok) throw new Error('No details');
-      const j = await r.json();
-      const d = { built: j.built, firstFlight: j.firstFlight, year: j.year, msn: j.msn, line: j.line, engines: j.engines, model: j.model, manufacturer: j.manufacturer, owner: j.owner, operator: j.operator, checked: new Date().toISOString() };
-      if (!plane.hex && j.hex) d.hex = j.hex;
-      return d;
+    // ---------- share link (admin) ----------
+    async share(method = 'GET', body) {
+      const { data } = await sb.auth.getSession();
+      const r = await fetch('/api/share', { method, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (data.session ? data.session.access_token : '') }, body: body ? JSON.stringify(body) : undefined });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || 'Couldn\'t reach the share settings.');
+      return j;
     },
-    async positions(regs) {
-      const direct = await livePositions(regs);
-      if (direct) return direct;
-      // Fallback: ask via the server, in batches.
-      const chunks = [];
-      for (let i = 0; i < regs.length; i += 100) chunks.push(regs.slice(i, i + 100));
-      const out = { at: Date.now(), planes: {}, errors: 0, failed: [] };
-      await Promise.all(chunks.map(async chunk => {
-        try {
-          const r = await fetch('/api/positions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ regs: chunk }) });
-          if (!r.ok) throw new Error('HTTP ' + r.status);
-          const j = await r.json();
-          Object.assign(out.planes, j.planes || {});
-          (j.failed || []).forEach(reg => out.failed.push(reg));
-          if (j.sourceErrors && j.sourceErrors.length) console.warn('Live data problem:', j.sourceErrors.join(' | '));
-        } catch (e) {
-          chunk.forEach(reg => out.failed.push(reg));
-        }
-      }));
-      out.errors = out.failed.length;
-      if (out.errors === regs.length) throw new Error('Live positions are not available right now.');
-      return out;
-    },
+    async details(plane) { return planeDetails(plane); },
+    async positions(regs) { return (await livePositions(regs)) || serverPositions(regs); },
     async savePosition(plane, live) {
       const rpc = await sb.rpc('record_position', { p_plane: plane.id, p_lat: live.lat, p_lon: live.lon, p_alt: live.alt == null ? null : Math.round(live.alt), p_track: live.track, p_on_ground: !!live.onGround });
       if (!rpc.error) return;
@@ -378,6 +422,7 @@ function demoStore() {
   const lid = () => 'local-' + Math.random().toString(36).slice(2);
   let demoAlerts = [{ id: 'demo-al1', reg: 'G-JZHA', kind: 'near', place: 'airport', place_name: 'Leeds Bradford', lat: 53.8659, lon: -1.6606, radius_mi: 10, active: true, state: {}, last_fired_at: new Date(Date.now() - 3 * 3600e3).toISOString() }];
   const demoSettings = { quiet_start: 21, quiet_end: 7 };
+  let demoShare = { enabled: false };
   return {
     mode: 'demo',
     authLink: { intent: null, error: null, clear() {} },
@@ -407,6 +452,12 @@ function demoStore() {
     async savePushSub() {},
     async deletePushSub() {},
     async testPush() { throw new Error('Notifications don\'t work in demo mode.'); },
+    async share(method = 'GET', body = {}) {
+      if (method === 'DELETE') demoShare = { enabled: false };
+      else if (method === 'POST') demoShare = { enabled: true, token: 'demo', notes: !!body.notes, created: new Date().toISOString() };
+      else if (method === 'PATCH') demoShare.notes = !!body.notes;
+      return { ...demoShare };
+    },
     async details(plane) {
       const seed = [...plane.reg].reduce((a, c) => a + c.charCodeAt(0), 0);
       const yr = 2026 - (seed % 22);

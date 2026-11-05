@@ -56,6 +56,7 @@ let dataLoadedAt = 0;
 let selected = null, filter = "all", showPins = false;
 const isAdmin = () => !!me && me.role === "admin";
 const canAdd = () => !!me && (me.role === "admin" || me.role === "spotter");
+const isGuest = () => !!me && !!me.guest;
 
 const spots = p => p.sightings.length;
 const latest = p => p.sightings.slice().sort((a, b) => b.spotted_on.localeCompare(a.spotted_on))[0];
@@ -326,7 +327,7 @@ function renderDetail(p) {
         ${posOf(p) ? `<button class="btn flat" type="button" data-go="plane"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>${p.live ? "Where it is now" : "Last position"}</button>` : ""}
       </div>
       ${canAdd() ? `<button class="btn primary wide" type="button" data-again><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>I spotted ${esc(p.reg)} again</button>` : ""}
-      <div class="btnrow"><button class="btn flat" type="button" data-alert><svg viewBox="0 0 24 24"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20a2 2 0 0 0 4 0"/></svg>Alert me about ${esc(p.reg)}</button></div>
+      ${isGuest() ? "" : `<div class="btnrow"><button class="btn flat" type="button" data-alert><svg viewBox="0 0 24 24"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20a2 2 0 0 0 4 0"/></svg>Alert me about ${esc(p.reg)}</button></div>`}
       ${admin ? `<div class="btnrow"><button class="btn danger" type="button" data-delp>Delete ${esc(p.reg)} from the logbook</button></div>` : ""}
     </div>`;
   const d = $("#detail");
@@ -335,7 +336,7 @@ function renderDetail(p) {
   const gp = d.querySelector('[data-go="plane"]'); if (gp) gp.addEventListener("click", () => flyTo(posOf(p), onGround(p) ? 13 : 7));
   d.querySelectorAll("[data-dels]").forEach(b => b.addEventListener("click", () => deleteSighting(p, p.sightings.find(s => s.id === b.dataset.dels))));
   const dp = d.querySelector("[data-delp]"); if (dp) dp.addEventListener("click", () => deletePlane(p));
-  d.querySelector("[data-alert]").addEventListener("click", () => openAlerts(p.reg));
+  const al = d.querySelector("[data-alert]"); if (al) al.addEventListener("click", () => openAlerts(p.reg));
   const ag = d.querySelector("[data-again]"); if (ag) ag.addEventListener("click", () => openAdd({ reg: p.reg }));
   d.querySelectorAll("[data-addm]").forEach(b => b.addEventListener("click", () => pickMediaFor(p, p.sightings.find(s => s.id === b.dataset.addm))));
   updClock();
@@ -427,11 +428,16 @@ function renderList() {
     return `<button class="row" type="button" data-id="${p.id}">${th ? `<img src="${th}" alt="" loading="lazy">` : `<span class="noimg"></span>`}<div><div class="r1">${esc(p.reg)}${n > 1 ? `<em>×${n}</em>` : ""}</div><div class="r2">${esc(p.type_name || "Type not set")} · ${esc(p.airline || "Airline not set")}</div><div class="r2">Last spotted ${fmtDate(l.spotted_on)}, ${esc(apName(l.airport))}</div></div>${chip}</button>`;
   }).join("") : PLANES.length ? `<p class="empty">No planes match “${esc(q)}”.</p>` : `<p class="empty">Nothing logged yet.${canAdd() ? " Tap Add spot to log your first plane." : ""}</p>`;
   $("#list").querySelectorAll(".row").forEach(r => r.addEventListener("click", () => select(r.dataset.id, true)));
+  if (isGuest()) {
+    $("#acct").innerHTML = `<div class="banner">You're looking at this logbook through a view-only link. Have a look around: tap any plane to see its photos and where it is now.</div>`;
+    return;
+  }
   const roleLabel = { admin: " (admin)", spotter: "", viewer: " (view only)" }[me.role] || "";
   $("#acct").innerHTML = `
     ${store.mode === "demo" ? `<div class="banner">Demo mode: these are sample planes and nothing is saved.</div>` : ""}
     <div class="who">Signed in as <b>${esc(me.name || me.email)}</b>${roleLabel}</div>
     <div class="btnrow">
+      ${isAdmin() ? `<button class="btn flat" type="button" id="shareBtn">Share a view-only link</button>` : ""}
       ${isAdmin() ? `<button class="btn flat" type="button" id="exportBtn">Download backup</button>` : ""}
       <button class="btn flat" type="button" id="myAlertsBtn">My alerts</button>
       ${store.mode !== "demo" ? `<button class="btn flat" type="button" id="chPwBtn">Change password</button>` : ""}
@@ -439,6 +445,7 @@ function renderList() {
     </div>`;
   $("#signOutBtn").addEventListener("click", signOut);
   const ex = $("#exportBtn"); if (ex) ex.addEventListener("click", exportBackup);
+  const sh = $("#shareBtn"); if (sh) sh.addEventListener("click", openShare);
   const cp = $("#chPwBtn"); if (cp) cp.addEventListener("click", () => showAuth("newpw", { mode: "change" }));
   $("#myAlertsBtn").addEventListener("click", () => openAlerts());
 }
@@ -746,6 +753,57 @@ async function openAlerts(reg) {
   selected = null; openSheet("alerts"); syncMap(); if (mapApi) mapApi.setPadding(mapPadding());
   $("#alerts").innerHTML = `<div class="sh-head"><div><h2>Plane alerts</h2></div><button class="icon-btn" data-close type="button" aria-label="Close">${CLOSE_SVG}</button></div><div class="sh-body"><p class="empty">Loading…</p></div>`;
   await loadAlerts(); renderAlerts();
+}
+/* ================= share link (admin) ================= */
+let SHARE = null;
+const shareUrl = s => `${location.origin}/?view=${encodeURIComponent(s.token)}`;
+async function openShare() {
+  selected = null; openSheet("share"); syncMap(); if (mapApi) mapApi.setPadding(mapPadding());
+  $("#share").innerHTML = `<div class="sh-head"><div><h2>Share a view-only link</h2></div><button class="icon-btn" data-close type="button" aria-label="Close">${CLOSE_SVG}</button></div><div class="sh-body"><p class="empty">Loading…</p></div>`;
+  try { SHARE = await store.share("GET"); } catch (e) { SHARE = { error: e.message }; }
+  renderShare();
+}
+function renderShare() {
+  const S = SHARE || {}, on = S.enabled && S.token;
+  $("#share").innerHTML = `<div class="sh-head"><div><h2>Share a view-only link</h2><div class="sh-sub">Anyone with the link can look, nobody can change anything</div></div><button class="icon-btn" data-close type="button" aria-label="Close">${CLOSE_SVG}</button></div>
+    <div class="sh-body">
+      ${S.error ? `<p class="err">${esc(S.error)}</p>` : ""}
+      ${on ? `
+        <section>
+          <h3 class="eyebrow">Your link</h3>
+          <div class="inrow"><input class="in mono" id="shareUrl" readonly value="${esc(shareUrl(S))}" aria-label="Share link"></div>
+          <div class="btnrow">
+            <button class="btn primary" type="button" id="shCopy">Copy link</button>
+            ${navigator.share ? `<button class="btn" type="button" id="shSend">Send…</button>` : ""}
+            <a class="btn flat" href="${esc(shareUrl(S))}" target="_blank" rel="noopener">Try it</a>
+          </div>
+          <p class="hint">They'll see the globe, every plane, the photos and videos, stats and the album. They can't add, change or delete anything, and they won't see alerts.</p>
+        </section>
+        <section><h3 class="eyebrow">What they see</h3>
+          <div class="setrow"><div><b>Include notes</b><small>The notes written on each spot</small></div><label class="switch"><input type="checkbox" id="shNotes"${S.notes ? " checked" : ""} aria-label="Include notes"><span></span></label></div>
+        </section>
+        <section><h3 class="eyebrow">Stop sharing</h3>
+          <div class="setrow"><div><b>Make a new link</b><small>The old link stops working straight away</small></div><button class="btn flat" type="button" id="shNew">New link</button></div>
+          <div class="setrow"><div><b>Turn sharing off</b><small>The link stops working. You can make a new one later.</small></div><button class="btn danger" type="button" id="shOff">Turn off</button></div>
+        </section>
+        ${S.created ? `<p class="credit">Link made ${fmtDate(S.created.slice(0, 10))}.</p>` : ""}`
+      : `
+        <p>Make a private link that lets anyone look at the logbook without signing in: the globe, the planes, photos and videos, stats and the album.</p>
+        <p class="hint">Only people you give the link to can open it, and you can turn it off at any time. Nobody with the link can change anything.</p>
+        <div class="setrow"><div><b>Include notes</b><small>The notes written on each spot</small></div><label class="switch"><input type="checkbox" id="shNotes" aria-label="Include notes"><span></span></label></div>
+        <button class="btn primary wide" type="button" id="shMake">Make a link</button>`}
+    </div>`;
+  const act = async (fn, okMsg) => { try { SHARE = await fn(); renderShare(); if (okMsg) toast(okMsg); } catch (e) { toast(e.message); } };
+  const mk = $("#shMake"); if (mk) mk.addEventListener("click", () => act(() => store.share("POST", { notes: $("#shNotes").checked }), "Link ready"));
+  const nt = $("#shNotes"); if (nt && on) nt.addEventListener("change", () => act(() => store.share("PATCH", { notes: nt.checked }), nt.checked ? "Notes will show" : "Notes hidden"));
+  const nw = $("#shNew"); if (nw) nw.addEventListener("click", () => { if (confirm("Make a new link? Anyone using the old one won't be able to open it any more.")) act(() => store.share("POST", { notes: !!S.notes }), "New link ready. The old one no longer works."); });
+  const of = $("#shOff"); if (of) of.addEventListener("click", () => { if (confirm("Turn the share link off? It will stop working for everyone.")) act(() => store.share("DELETE"), "Sharing is off"); });
+  const cp = $("#shCopy"); if (cp) cp.addEventListener("click", async () => {
+    const u = shareUrl(S);
+    try { await navigator.clipboard.writeText(u); toast("Link copied"); }
+    catch (e) { const i = $("#shareUrl"); i.focus(); i.select(); toast("Select the link and copy it"); }
+  });
+  const sd = $("#shSend"); if (sd) sd.addEventListener("click", () => navigator.share({ title: "Spotter's Logbook", text: "Have a look at the planes we've spotted!", url: shareUrl(S) }).catch(() => {}));
 }
 function openPlaneByReg(reg) {
   const p = PLANES.find(x => x.reg === reg);
@@ -1193,17 +1251,20 @@ async function signOut() {
   await store.signOut();
   me = null; PLANES = []; closeSheets(true); syncMap(); updBrand(); applyRole(); showAuth("login");
 }
-function applyRole() { document.body.classList.toggle("viewer", !!me && !canAdd()); updWelcome(); }
+function applyRole() { document.body.classList.toggle("viewer", !!me && !canAdd()); document.body.classList.toggle("guest", isGuest()); updWelcome(); }
 async function startApp() {
   hideAuth(); $("#boot").hidden = true; applyRole();
   try { await reload(null); }
-  catch (e) { toast("Couldn't load the logbook: " + e.message, 6000); }
+  catch (e) {
+    if (e.linkOff) { const b = $("#boot"); b.textContent = "This link has been turned off. Ask whoever sent it for a new one."; b.classList.add("msg"); b.hidden = false; return; }
+    toast("Couldn't load the logbook: " + e.message, 6000);
+  }
   refreshPositions(); startPositionLoop();
   loadAlerts().then(() => { if (ALERTS.some(a => a.active && a.place === "me")) updateHere(true); });
   // Fill in plane ages quietly in the background, a few at a time, so stats and badges can use them.
   (async () => { for (const p of PLANES.filter(p => !p.details).slice(0, 40)) { await ensureDetails(p); await new Promise(r => setTimeout(r, 400)); } if ($("#stats").classList.contains("open")) renderStats(); })();
   const want = new URLSearchParams(location.search).get("plane");
-  if (want) { history.replaceState(null, "", location.pathname); openPlaneByReg(want.toUpperCase()); }
+  if (want) { const q = new URLSearchParams(location.search); q.delete("plane"); history.replaceState(null, "", location.pathname + (q.toString() ? "?" + q : "")); openPlaneByReg(want.toUpperCase()); }
 }
 
 /* ================= boot ================= */

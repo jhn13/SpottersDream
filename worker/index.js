@@ -7,6 +7,7 @@ import * as airport from '../functions/api/airport.js';
 import * as push from '../functions/api/push.js';
 import * as aircraft from '../functions/api/aircraft.js';
 import * as routes from '../functions/api/routes.js';
+import * as share from '../functions/api/share.js';
 import { runCron } from '../lib/cron.js';
 
 const ROUTES = { '/api/lookup': lookup, '/api/positions': positions, '/api/airport': airport, '/api/aircraft': aircraft, '/api/routes': routes };
@@ -14,6 +15,10 @@ const ROUTES = { '/api/lookup': lookup, '/api/positions': positions, '/api/airpo
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    if (url.pathname === '/api/share' || url.pathname.startsWith('/api/public/')) {
+      try { return await share.onRequest({ request, env, ctx }); }
+      catch (e) { return new Response(JSON.stringify({ error: 'Something went wrong loading the shared logbook.' }), { status: 500, headers: { 'Content-Type': 'application/json' } }); }
+    }
     if (url.pathname.startsWith('/api/push/')) {
       try { return await push.onRequest({ request, env, ctx }); }
       catch (e) { return new Response(JSON.stringify({ error: 'Something went wrong with notifications.' }), { status: 500, headers: { 'Content-Type': 'application/json' } }); }

@@ -72,6 +72,7 @@ Open the site in Safari, tap **Share → Add to Home Screen**. It then opens ful
 - **Viewer:** see everything (globe, logbook, stats, airports) but can't add or delete. Everyone you add in Supabase starts as a viewer.
 - **Spotter:** add spots, photos and videos, and see everything.
 - **Admin:** everything above, plus deleting spots, photos and planes, and downloading a backup (Logbook → Download backup).
+- **Anyone with a share link:** the admin can make a view-only link (Logbook → Share a view-only link). Whoever opens it sees the globe, planes, photos, stats and album without signing in, but can't change anything or see alerts. Notes are hidden unless you switch them on. Making a new link or turning sharing off stops the old link straight away. It needs the Supabase secret key in Cloudflare (the same one alerts use).
 - Nobody else can sign up. Each request is checked by the database's security rules, and photos sit in a private bucket that's served through links that expire.
 
 ## Good to know

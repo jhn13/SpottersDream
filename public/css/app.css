@@ -317,6 +317,7 @@ html{background:var(--space-b)}
 .prev .vbadge{position:absolute;left:5px;bottom:5px;font:600 10px/1 var(--f-mono);color:#fff;background:rgba(10,20,28,.65);padding:3px 5px;border-radius:5px}
 #lightbox video{max-width:100%;max-height:100%;border-radius:10px;background:#000}
 #lightbox .lbdel{position:absolute;left:calc(12px + env(safe-area-inset-left,0px));top:calc(12px + env(safe-area-inset-top,0px));border:0;border-radius:10px;background:rgba(255,255,255,.15);color:#fff;font:600 13px/1 var(--f-display);text-transform:uppercase;letter-spacing:.05em;padding:12px 14px}
+#boot.msg{text-transform:none;letter-spacing:0;font:500 16px/1.5 var(--f-body,inherit);padding:24px;text-align:center}
 #boot{position:fixed;inset:0;z-index:90;display:grid;place-items:center;background:var(--space-b);color:var(--muted);font:600 14px/1 var(--f-display);text-transform:uppercase;letter-spacing:.08em}
 .feedwarn{color:#C0392B}
 .sightings .acts{display:flex;gap:14px;margin-top:4px}
@@ -476,3 +477,9 @@ body.viewer #openAdd, body.viewer #welcomeAdd, body.viewer .logit{display:none!i
 dl.facts{display:grid;grid-template-columns:auto 1fr;gap:8px 16px;margin:0}
 dl.facts dt{color:var(--muted);font-size:13.5px}
 dl.facts dd{margin:0;font-weight:600;min-width:0;overflow-wrap:anywhere}
+
+/* view-only share link */
+#share .inrow .in{font-size:13px;text-transform:none;letter-spacing:0}
+#share .btnrow{margin:10px 0}
+#acct .banner{margin-bottom:4px}
+#share section{margin-bottom:18px}
